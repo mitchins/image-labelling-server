@@ -1,0 +1,40 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+._*.db
+
+# Server logs
+*.log
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+._*
+
+# Temporary files
+cluster_index.json
+queue.db
+server.log

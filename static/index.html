@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Label</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="header">
+        <div class="title">
+            <h1>🏷️ Smart Label</h1>
+            <span class="subtitle" id="taskName">Loading...</span>
+        </div>
+        <div class="progress-container">
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div class="progress-text" id="progressText">Loading...</div>
+        </div>
+        <div class="header-actions">
+            <button class="btn-secondary" onclick="showHistory()">📜 History</button>
+            <button class="btn-secondary" onclick="showStats()">📊 Stats</button>
+            <button class="btn-secondary" onclick="undoLast()">↩ Undo (Z)</button>
+        </div>
+    </div>
+    
+    <div class="main" id="main">
+        <div class="loading">
+            <div class="spinner"></div>
+            <p>Loading...</p>
+        </div>
+    </div>
+    
+    <div class="footer">
+        <div class="shortcuts" id="shortcuts">
+            <span class="shortcut-group">Loading shortcuts...</span>
+        </div>
+    </div>
+
+    <!-- Stats Modal -->
+    <div class="modal" id="statsModal" onclick="closeModal(event)">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <h2>📊 Labeling Statistics</h2>
+            <div id="statsContent">Loading...</div>
+            <button class="btn-primary" onclick="closeStats()">Close</button>
+        </div>
+    </div>
+
+    <!-- History Modal -->
+    <div class="modal" id="historyModal" onclick="closeModal(event)">
+        <div class="modal-content modal-large" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h2>📜 Labeling History</h2>
+                <div class="history-controls">
+                    <select id="historyFilter" onchange="loadHistory(1)">
+                        <option value="">All Labels</option>
+                    </select>
+                </div>
+            </div>
+            <div id="historyContent">Loading...</div>
+            <div class="history-pagination" id="historyPagination"></div>
+            <button class="btn-primary" onclick="closeHistory()">Close</button>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
