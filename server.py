@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.params import Path as PathParam
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -204,24 +205,15 @@ async def get_batch(count: int = Query(default=5, le=20)):
 
 
 @app.get("/api/replacement/{cluster_id}")
-async def get_replacement(cluster_id: int):
+async def get_replacement(cluster_id: str = PathParam(..., description="Cluster ID or 'null'")):
     """Get a replacement frame from the same cluster (for rejections)."""
     with get_db() as conn:
         cur = conn.cursor()
         select_cols = build_select_columns()
         
-        # Get an unlabeled frame from the same cluster
-        cur.execute(f"""
-            SELECT {select_cols}
-            FROM queue
-            WHERE cluster_id = ? AND human_label IS NULL
-            ORDER BY RANDOM()
-            LIMIT 1
-        """, (cluster_id,))
-        row = cur.fetchone()
-        
-        if not row:
-            # Cluster exhausted, return any unlabeled frame
+        # Handle null cluster_id (no cluster) - just return any unlabeled frame
+        if cluster_id == "null" or cluster_id is None:
+            # No cluster, return any unlabeled frame
             cur.execute(f"""
                 SELECT {select_cols}
                 FROM queue
@@ -233,6 +225,47 @@ async def get_replacement(cluster_id: int):
             
             if not row:
                 return JSONResponse({"done": True, "message": "All images labeled!"})
+        else:
+            # Try to convert to int
+            try:
+                cluster_id_int = int(cluster_id)
+            except (ValueError, TypeError):
+                # Invalid cluster_id, return any unlabeled frame
+                cur.execute(f"""
+                    SELECT {select_cols}
+                    FROM queue
+                    WHERE human_label IS NULL
+                    ORDER BY RANDOM()
+                    LIMIT 1
+                """)
+                row = cur.fetchone()
+                
+                if not row:
+                    return JSONResponse({"done": True, "message": "All images labeled!"})
+            else:
+                # Get an unlabeled frame from the same cluster
+                cur.execute(f"""
+                    SELECT {select_cols}
+                    FROM queue
+                    WHERE cluster_id = ? AND human_label IS NULL
+                    ORDER BY RANDOM()
+                    LIMIT 1
+                """, (cluster_id_int,))
+                row = cur.fetchone()
+                
+                if not row:
+                    # Cluster exhausted, return any unlabeled frame
+                    cur.execute(f"""
+                        SELECT {select_cols}
+                        FROM queue
+                        WHERE human_label IS NULL
+                        ORDER BY RANDOM()
+                        LIMIT 1
+                    """)
+                    row = cur.fetchone()
+                    
+                    if not row:
+                        return JSONResponse({"done": True, "message": "All images labeled!"})
         
         # Get stats (only count 1-6 labels, not REFUSE)
         progress = get_progress_stats(cur)
