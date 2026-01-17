@@ -51,6 +51,44 @@ def get_db():
         conn.close()
 
 
+def build_select_columns() -> str:
+    """Build SELECT clause with base columns and optional metadata."""
+    cols = ["id", "path", "cluster_id", "predicted_style", "predicted_confidence"]
+    
+    if CONFIG and CONFIG.metadata_fields:
+        cols.extend(CONFIG.metadata_fields)
+    
+    return ", ".join(cols)
+
+
+def safe_get_metadata(row, field: str):
+    """Safely get metadata field from row, returning None if column doesn't exist."""
+    try:
+        return row[field]
+    except IndexError:
+        return None
+
+
+def build_image_response(row) -> dict:
+    """Build response dict from queue row, handling optional metadata."""
+    response = {
+        "id": row["id"],
+        "path": row["path"],
+        "cluster_id": row["cluster_id"],
+        "predicted_style": row["predicted_style"],
+        "predicted_confidence": row["predicted_confidence"],
+    }
+    
+    if CONFIG and CONFIG.metadata_fields:
+        for field in CONFIG.metadata_fields:
+            try:
+                response[field] = row[field]
+            except IndexError:
+                response[field] = None
+    
+    return response
+
+
 def get_progress_stats(cur):
     """Get progress stats - only counts actual labels (1-6), not REFUSE."""
     cur.execute("SELECT COUNT(*) FROM queue")
@@ -73,6 +111,12 @@ class LabelRequest(BaseModel):
     label: str  # One of the configured labels or REFUSE
     quality_flag: Optional[str] = None  # Optional flag (e.g., BAD_QUALITY)
     session_id: Optional[str] = None
+
+
+class RelabelRequest(BaseModel):
+    """Request to relabel a previously labeled image (image_id from path)."""
+    label: str  # One of the configured labels or REFUSE
+    quality_flag: Optional[str] = None  # Optional flag (e.g., BAD_QUALITY)
 
 
 class StatsResponse(BaseModel):
@@ -113,10 +157,12 @@ async def get_next_image(session_id: str = Query(default=None)):
     with get_db() as conn:
         cur = conn.cursor()
         
+        # Build query with optional metadata
+        select_cols = build_select_columns()
+        
         # Get next unlabeled image (not REFUSE)
-        cur.execute("""
-            SELECT id, path, cluster_id, predicted_style, predicted_confidence, 
-                   series_name, production_year, demographic
+        cur.execute(f"""
+            SELECT {select_cols}
             FROM queue
             WHERE human_label IS NULL
             ORDER BY RANDOM()
@@ -130,18 +176,10 @@ async def get_next_image(session_id: str = Query(default=None)):
         # Get stats (only count 1-6 labels, not REFUSE)
         progress = get_progress_stats(cur)
         
-        return {
-            "done": False,
-            "id": row["id"],
-            "path": row["path"],
-            "cluster_id": row["cluster_id"],
-            "predicted_style": row["predicted_style"],
-            "predicted_confidence": row["predicted_confidence"],
-            "series_name": row["series_name"],
-            "production_year": row["production_year"],
-            "demographic": row["demographic"],
-            "progress": progress
-        }
+        response = build_image_response(row)
+        response["done"] = False
+        response["progress"] = progress
+        return response
 
 
 @app.get("/api/batch")
@@ -149,8 +187,10 @@ async def get_batch(count: int = Query(default=5, le=20)):
     """Get a batch of unlabeled images for preloading."""
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("""
-            SELECT id, path, cluster_id, predicted_style, predicted_confidence
+        select_cols = build_select_columns()
+        
+        cur.execute(f"""
+            SELECT {select_cols}
             FROM queue
             WHERE human_label IS NULL
             ORDER BY RANDOM()
@@ -159,16 +199,7 @@ async def get_batch(count: int = Query(default=5, le=20)):
         rows = cur.fetchall()
         
         return {
-            "images": [
-                {
-                    "id": row["id"],
-                    "path": row["path"],
-                    "cluster_id": row["cluster_id"],
-                    "predicted_style": row["predicted_style"],
-                    "predicted_confidence": row["predicted_confidence"]
-                }
-                for row in rows
-            ]
+            "images": [build_image_response(row) for row in rows]
         }
 
 
@@ -177,11 +208,11 @@ async def get_replacement(cluster_id: int):
     """Get a replacement frame from the same cluster (for rejections)."""
     with get_db() as conn:
         cur = conn.cursor()
+        select_cols = build_select_columns()
         
         # Get an unlabeled frame from the same cluster
-        cur.execute("""
-            SELECT id, path, cluster_id, predicted_style, predicted_confidence, 
-                   series_name, production_year, demographic
+        cur.execute(f"""
+            SELECT {select_cols}
             FROM queue
             WHERE cluster_id = ? AND human_label IS NULL
             ORDER BY RANDOM()
@@ -191,9 +222,8 @@ async def get_replacement(cluster_id: int):
         
         if not row:
             # Cluster exhausted, return any unlabeled frame
-            cur.execute("""
-                SELECT id, path, cluster_id, predicted_style, predicted_confidence,
-                       series_name, production_year, demographic
+            cur.execute(f"""
+                SELECT {select_cols}
                 FROM queue
                 WHERE human_label IS NULL
                 ORDER BY RANDOM()
@@ -207,18 +237,10 @@ async def get_replacement(cluster_id: int):
         # Get stats (only count 1-6 labels, not REFUSE)
         progress = get_progress_stats(cur)
         
-        return {
-            "done": False,
-            "id": row["id"],
-            "path": row["path"],
-            "cluster_id": row["cluster_id"],
-            "predicted_style": row["predicted_style"],
-            "predicted_confidence": row["predicted_confidence"],
-            "series_name": row["series_name"],
-            "production_year": row["production_year"],
-            "demographic": row["demographic"],
-            "progress": progress
-        }
+        response = build_image_response(row)
+        response["done"] = False
+        response["progress"] = progress
+        return response
 
 
 
@@ -387,18 +409,23 @@ async def get_history(
         cur.execute(f"SELECT COUNT(*) FROM queue {where_clause}", params)
         total = cur.fetchone()[0]
         
+        # Build select with metadata
+        select_cols = "id, path, human_label, cluster_id, predicted_style, predicted_confidence, labeled_at, quality_flag"
+        if CONFIG and CONFIG.metadata_fields:
+            select_cols += ", " + ", ".join(CONFIG.metadata_fields)
+        
         # Get page of results
         cur.execute(f"""
-            SELECT id, path, human_label, cluster_id, predicted_style, 
-                   predicted_confidence, labeled_at, quality_flag
+            SELECT {select_cols}
             FROM queue
             {where_clause}
             ORDER BY labeled_at DESC
             LIMIT ? OFFSET ?
         """, params + [per_page, offset])
         
-        items = [
-            {
+        items = []
+        for row in cur.fetchall():
+            item = {
                 "id": row["id"],
                 "path": row["path"],
                 "label": row["human_label"],
@@ -408,8 +435,16 @@ async def get_history(
                 "labeled_at": row["labeled_at"],
                 "quality_flag": row["quality_flag"],
             }
-            for row in cur.fetchall()
-        ]
+            
+            # Add metadata fields
+            if CONFIG and CONFIG.metadata_fields:
+                for field in CONFIG.metadata_fields:
+                    try:
+                        item[field] = row[field]
+                    except IndexError:
+                        item[field] = None
+            
+            items.append(item)
         
         return {
             "items": items,
@@ -421,7 +456,7 @@ async def get_history(
 
 
 @app.post("/api/history/{image_id}/relabel")
-async def relabel_from_history(image_id: int, request: LabelRequest):
+async def relabel_from_history(image_id: int, request: RelabelRequest):
     """Change label for a previously labeled image."""
     valid_labels = get_valid_labels()
     if request.label not in valid_labels:
