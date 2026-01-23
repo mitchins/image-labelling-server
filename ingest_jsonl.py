@@ -39,6 +39,8 @@ def create_queue_db(db_path: Path, metadata_fields: list):
         f"""
         DROP TABLE IF EXISTS queue;
         DROP TABLE IF EXISTS sessions;
+        DROP TABLE IF EXISTS labels;
+        DROP TABLE IF EXISTS settings;
 
         CREATE TABLE queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,9 +61,56 @@ def create_queue_db(db_path: Path, metadata_fields: list):
             labels_count INTEGER DEFAULT 0
         );
 
+        CREATE TABLE labels (
+            name TEXT PRIMARY KEY,
+            color TEXT,
+            sort_order INTEGER
+        );
+
+        CREATE TABLE settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+
         CREATE INDEX idx_queue_unlabeled ON queue(human_label) WHERE human_label IS NULL;
         CREATE INDEX idx_queue_cluster ON queue(cluster_id);
         """
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def write_labels_and_settings(
+    db_path: Path,
+    labels: list,
+    name: str,
+    description: str,
+    metadata_fields: list,
+    hint_field: str,
+    hint_confidence_field: str,
+    cluster_field: str,
+):
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    cur.executemany(
+        "INSERT OR REPLACE INTO labels (name, color, sort_order) VALUES (?, NULL, ?)",
+        [(label, idx) for idx, label in enumerate(labels)],
+    )
+
+    settings = {
+        "name": name,
+        "description": description,
+        "hint_field": hint_field,
+        "hint_confidence_field": hint_confidence_field,
+        "cluster_field": cluster_field,
+        "metadata_fields": metadata_fields,
+    }
+
+    cur.executemany(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+        [(key, json.dumps(value)) for key, value in settings.items()],
     )
 
     conn.commit()
@@ -278,6 +327,16 @@ def main():
     db_path = Path(args.db)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     create_queue_db(db_path, metadata_fields)
+    write_labels_and_settings(
+        db_path,
+        labels,
+        args.name,
+        args.description,
+        metadata_fields,
+        args.hint_field,
+        args.hint_confidence_field,
+        args.cluster_field,
+    )
     insert_items(db_path, items, metadata_fields)
 
     config_path = Path(args.config)

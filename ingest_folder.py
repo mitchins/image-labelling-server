@@ -46,6 +46,8 @@ def create_queue_db(db_path: Path, image_paths: list):
         """
         DROP TABLE IF EXISTS queue;
         DROP TABLE IF EXISTS sessions;
+        DROP TABLE IF EXISTS labels;
+        DROP TABLE IF EXISTS settings;
 
         CREATE TABLE queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,6 +66,17 @@ def create_queue_db(db_path: Path, image_paths: list):
             started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_activity TIMESTAMP,
             labels_count INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE labels (
+            name TEXT PRIMARY KEY,
+            color TEXT,
+            sort_order INTEGER
+        );
+
+        CREATE TABLE settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
         );
 
         CREATE INDEX idx_queue_unlabeled ON queue(human_label) WHERE human_label IS NULL;
@@ -86,6 +99,32 @@ def create_queue_db(db_path: Path, image_paths: list):
         VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
         """,
         [(str(p),) for p in image_paths],
+    )
+
+    conn.commit()
+    conn.close()
+
+def write_labels_and_settings(db_path: Path, labels: list, name: str, description: str):
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    cur.executemany(
+        "INSERT OR REPLACE INTO labels (name, color, sort_order) VALUES (?, NULL, ?)",
+        [(label, idx) for idx, label in enumerate(labels)],
+    )
+
+    settings = {
+        "name": name,
+        "description": description,
+        "hint_field": None,
+        "hint_confidence_field": None,
+        "cluster_field": None,
+        "metadata_fields": [],
+    }
+
+    cur.executemany(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+        [(key, json.dumps(value)) for key, value in settings.items()],
     )
 
     conn.commit()
@@ -174,6 +213,7 @@ def main():
     db_path = Path(args.db)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     create_queue_db(db_path, image_paths)
+    write_labels_and_settings(db_path, labels, args.name, args.description)
 
     config_path = Path(args.config)
     write_config(config_path, db_path, labels, args.name, args.description)

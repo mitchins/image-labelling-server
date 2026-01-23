@@ -33,6 +33,14 @@ If you see `ModuleNotFoundError: No module named smart_label`, you are either:
 - in the wrong folder (run from the parent directory), or
 - missing the editable install (`pip install -e .`).
 
+## Labels and Config (Single Source of Truth)
+
+Labels live in the **database** (`labels` table). Ingest commands populate them.
+`serve` will read labels from the DB by default. A config file is optional and
+only needed to override labels/metadata or customize UI colors.
+
+If you pass `--config`, those labels override the DB.
+
 ## Quick Start (Pick One Ingestion Path)
 
 ### 1) Folder of images (fastest path)
@@ -130,6 +138,17 @@ CREATE TABLE queue (
     quality_flag TEXT,             -- 'BAD_QUALITY' if marked
     session_id TEXT
     -- plus any metadata columns you configured
+);
+
+CREATE TABLE labels (
+    name TEXT PRIMARY KEY,
+    color TEXT,
+    sort_order INTEGER
+);
+
+CREATE TABLE settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
 );
 ```
 

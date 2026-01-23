@@ -71,7 +71,9 @@ class LabelConfig:
             "description": self.description,
             "labels": self.labels,
             "label_colors": self.label_colors,
+            "db_path": self.db_path,
             "hint_field": self.hint_field,
+            "hint_confidence_field": self.hint_confidence_field,
             "cluster_field": self.cluster_field,
             "metadata_fields": self.metadata_fields,
         }

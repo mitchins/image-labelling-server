@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -60,6 +61,70 @@ def build_select_columns() -> str:
         cols.extend(CONFIG.metadata_fields)
     
     return ", ".join(cols)
+
+
+def _table_exists(cur, table_name: str) -> bool:
+    cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    )
+    return cur.fetchone() is not None
+
+
+def load_config_from_db(db_path: str):
+    """Load label config from database tables if present."""
+    from .config import LabelConfig
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    if not _table_exists(cur, "labels"):
+        conn.close()
+        return None
+
+    cur.execute(
+        """
+        SELECT name, color, sort_order
+        FROM labels
+        ORDER BY (sort_order IS NULL), sort_order, name
+        """
+    )
+    label_rows = cur.fetchall()
+    if not label_rows:
+        conn.close()
+        return None
+
+    labels = [row["name"] for row in label_rows]
+    label_colors = {
+        row["name"]: row["color"]
+        for row in label_rows
+        if row["color"]
+    }
+
+    settings = {}
+    if _table_exists(cur, "settings"):
+        cur.execute("SELECT key, value FROM settings")
+        for row in cur.fetchall():
+            try:
+                settings[row["key"]] = json.loads(row["value"])
+            except json.JSONDecodeError:
+                settings[row["key"]] = row["value"]
+
+    conn.close()
+
+    return LabelConfig(
+        name=settings.get("name") or "Labeling Task",
+        description=settings.get("description") or "",
+        labels=labels,
+        label_colors=label_colors,
+        db_path=db_path,
+        hint_field=settings.get("hint_field"),
+        hint_confidence_field=settings.get("hint_confidence_field"),
+        cluster_field=settings.get("cluster_field"),
+        metadata_fields=settings.get("metadata_fields") or [],
+        garbage_classifier_path=None,
+    )
 
 
 def safe_get_metadata(row, field: str):
@@ -961,17 +1026,19 @@ def main():
         from .config import LabelConfig
         CONFIG = LabelConfig.from_file(args.config)
         print(f"✓ Loaded config: {CONFIG.name}")
+        DB_PATH = args.db or getattr(CONFIG, "db_path", None)
     else:
-        # Default anime style config for backward compatibility
-        from .config import ANIME_STYLE_CONFIG
-        CONFIG = ANIME_STYLE_CONFIG
-        print("✓ Using default anime style config")
-
-    DB_PATH = args.db or getattr(CONFIG, "db_path", None)
-    if not DB_PATH:
-        print("Error: Database path not provided. Use --db or set db_path in the config.")
-        return 1
-
+        DB_PATH = args.db
+        if not DB_PATH:
+            print("Error: Database path not provided. Use --db when no config is supplied.")
+            return 1
+        CONFIG = load_config_from_db(DB_PATH)
+        if CONFIG:
+            print(f"✓ Loaded labels from database: {CONFIG.name}")
+        else:
+            print("Error: No config provided and no labels found in the database.")
+            print("Create labels via ingest, or pass --config with labels.")
+            return 1
     if not Path(DB_PATH).exists():
         print(f"Error: Database not found: {DB_PATH}")
         print("Run prepare.py or ingest to create the queue database")
