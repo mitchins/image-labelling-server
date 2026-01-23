@@ -1156,9 +1156,60 @@ def get_inline_html():
         }
         
         async function relabelImage(imageId) {
-            // This would require loading a specific image and allowing relabeling
-            // For now, just load next - the image will come back up if needed
+            // Fetch the image details
+            const res = await fetch(`/api/next?force_id=${imageId}`);
+            if (!res.ok) {
+                alert('Could not load image');
+                return;
+            }
+            const image = await res.json();
+            
+            // Set as current image and re-render with relabel mode
+            currentImage = image;
+            currentImage.isRelabel = true;  // Mark as relabel mode
             closeHistory();
+            
+            // Re-render without updating progress (it's already labeled)
+            document.getElementById('main').innerHTML = `
+                <div class="image-container">
+                    <img src="/api/image/${image.id}" alt="Frame to relabel">
+                </div>
+                <div class="prediction">
+                    Previous label: <strong style="color: #888">${image.predicted_style}</strong>
+                    | Choose correct label:
+                </div>
+                <div class="buttons">
+                    ${STYLES.map((s, i) => `
+                        <button class="btn btn-${s.replace(/_/g, '-')}" onclick="submitRelabel('${s}')">
+                            ${s} <span class="shortcut">${i+1}</span>
+                        </button>
+                    `).join('')}
+                    <button class="btn btn-refuse" onclick="cancelRelabel()">
+                        Cancel <span class="shortcut">Esc</span>
+                    </button>
+                </div>
+            `;
+        }
+        
+        async function submitRelabel(newLabel) {
+            if (!currentImage) return;
+            const res = await fetch(`/api/history/${currentImage.id}/relabel`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({label: newLabel})
+            });
+            
+            if (res.ok) {
+                console.log(`Relabeled image ${currentImage.id} to ${newLabel}`);
+                // Load next unlabeled image
+                loadNext();
+            } else {
+                alert('Failed to relabel image');
+            }
+        }
+        
+        function cancelRelabel() {
+            currentImage = null;
             loadNext();
         }
         
