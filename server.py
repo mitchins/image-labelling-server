@@ -22,6 +22,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.params import Path as PathParam
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
@@ -35,6 +36,15 @@ GARBAGE_CLASSIFIER = None
 CONFIG = None  # LabelConfig instance
 
 app = FastAPI(title="Smart Label", description="Configurable image labeling")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Mount static files directory
 static_dir = Path(__file__).parent / "static"
@@ -844,22 +854,62 @@ def get_inline_html():
         <div class="loading">Loading...</div>
     </div>
     
-    <div class="help">
-        Keyboard: 1=flat 2=grim 3=modern 4=moe 5=painterly 6=retro X/Space=refuse Z=undo
+    <div class="help" id="help">
+        Keyboard: Loading...
     </div>
 
     <script>
+        // UUID v4 polyfill for browsers that don't support crypto.randomUUID
+        function generateUUID() {
+            if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+                return crypto.randomUUID();
+            }
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                const r = Math.random() * 16 | 0;
+                const v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+        
         let currentImage = null;
         let preloadedImages = [];
-        let sessionId = localStorage.getItem('sessionId') || crypto.randomUUID();
+        let sessionId = localStorage.getItem('sessionId') || generateUUID();
         localStorage.setItem('sessionId', sessionId);
         
-        const STYLES = ['flat', 'grim', 'modern', 'moe', 'painterly', 'retro'];
-        const KEY_MAP = {
-            '1': 'flat', '2': 'grim', '3': 'modern',
-            '4': 'moe', '5': 'painterly', '6': 'retro',
-            'x': 'REFUSE', ' ': 'REFUSE'
-        };
+        let STYLES = [];
+        let KEY_MAP = {};
+        
+        // Load config from server
+        async function loadConfig() {
+            try {
+                const res = await fetch('/api/config');
+                const config = await res.json();
+                STYLES = config.labels || [];
+                
+                // Build KEY_MAP from STYLES
+                KEY_MAP = {};
+                STYLES.forEach((style, i) => {
+                    KEY_MAP[(i + 1).toString()] = style;
+                });
+                KEY_MAP['x'] = 'REFUSE';
+                KEY_MAP[' '] = 'REFUSE';
+            } catch (e) {
+                console.error('Failed to load config:', e);
+                // Fallback
+                STYLES = ['real_photo', 'anime_illustration', 'comic_lineart', 'painting_physical', 'rendered_2d', 'rendered_3d', 'screenshot'];
+                ['1', '2', '3', '4', '5', '6', '7'].forEach((key, i) => {
+                    KEY_MAP[key] = STYLES[i];
+                });
+                KEY_MAP['x'] = 'REFUSE';
+                KEY_MAP[' '] = 'REFUSE';
+            }
+            updateHelpText();
+        }
+        
+        function updateHelpText() {
+            const shortcuts = STYLES.map((s, i) => `${i+1}=${s}`).join(' ');
+            document.getElementById('help').textContent = `Keyboard: ${shortcuts} X/Space=refuse Z=undo Q=bad quality`;
+        }
         
         async function loadNext() {
             const res = await fetch('/api/next?session_id=' + sessionId);
@@ -970,8 +1020,8 @@ def get_inline_html():
             }
         });
         
-        // Start
-        loadNext();
+        // Start - load config first, then load next image
+        loadConfig().then(() => loadNext());
     </script>
 </body>
 </html>
