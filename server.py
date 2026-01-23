@@ -725,13 +725,24 @@ def get_inline_html():
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 20px;
+        }
+        .header h2 {
+            min-width: fit-content;
+        }
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            flex: 0 0 auto;
         }
         .progress-bar {
-            width: 300px;
+            width: 250px;
             height: 8px;
             background: #333;
             border-radius: 4px;
             overflow: hidden;
+            min-width: 250px;
         }
         .progress-fill {
             height: 100%;
@@ -739,8 +750,10 @@ def get_inline_html():
             transition: width 0.3s;
         }
         .progress-text {
-            font-size: 14px;
+            font-size: 12px;
             color: #aaa;
+            min-width: 80px;
+            text-align: right;
         }
         .main {
             flex: 1;
@@ -833,22 +846,114 @@ def get_inline_html():
             border-radius: 5px;
             cursor: pointer;
             font-size: 12px;
+            z-index: 100;
         }
         .undo-btn:hover { background: #444; }
+        .history-btn {
+            position: fixed;
+            top: 50px;
+            right: 20px;
+            background: #333;
+            color: #aaa;
+            border: 1px solid #555;
+            padding: 8px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+            z-index: 100;
+        }
+        .history-btn:hover { background: #444; }
+        .history-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            z-index: 200;
+            align-items: center;
+            justify-content: center;
+        }
+        .history-modal.active {
+            display: flex;
+        }
+        .history-content {
+            background: #1a1a2e;
+            border: 1px solid #444;
+            border-radius: 8px;
+            padding: 20px;
+            max-width: 800px;
+            max-height: 80vh;
+            overflow-y: auto;
+            color: #eee;
+        }
+        .history-item {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            padding: 10px;
+            border-bottom: 1px solid #333;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .history-item:hover {
+            background: #222;
+        }
+        .history-item img {
+            width: 60px;
+            height: 60px;
+            object-fit: cover;
+            border-radius: 4px;
+        }
+        .history-item-info {
+            flex: 1;
+        }
+        .history-item-label {
+            font-weight: bold;
+            color: #4CAF50;
+        }
+        .history-item-time {
+            font-size: 12px;
+            color: #888;
+            margin-top: 5px;
+        }
+        .history-close {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: #444;
+            color: #aaa;
+            border: none;
+            padding: 10px 15px;
+            cursor: pointer;
+            border-radius: 5px;
+        }
     </style>
 </head>
 <body>
     <div class="header">
         <h2>🎨 Smart Label</h2>
-        <div>
-            <div class="progress-bar">
-                <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+        <div class="header-right">
+            <div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+                </div>
+                <div class="progress-text" id="progressText">Loading...</div>
             </div>
-            <div class="progress-text" id="progressText">Loading...</div>
         </div>
     </div>
     
     <button class="undo-btn" onclick="undoLast()">↩ Undo (Z)</button>
+    <button class="history-btn" onclick="showHistory()">📋 History (H)</button>
+    
+    <div id="historyModal" class="history-modal">
+        <div class="history-content">
+            <button class="history-close" onclick="closeHistory()">✕</button>
+            <h2>Labeling History</h2>
+            <div id="historyList"></div>
+        </div>
+    </div>
     
     <div class="main" id="main">
         <div class="loading">Loading...</div>
@@ -1008,6 +1113,48 @@ def get_inline_html():
             }
         }
         
+        async function showHistory() {
+            const res = await fetch('/api/history');
+            const history = await res.json();
+            const historyList = document.getElementById('historyList');
+            historyList.innerHTML = '';
+            
+            if (!history.history || history.history.length === 0) {
+                historyList.innerHTML = '<p>No labels yet</p>';
+                document.getElementById('historyModal').classList.add('active');
+                return;
+            }
+            
+            for (const item of history.history) {
+                const div = document.createElement('div');
+                div.className = 'history-item';
+                const timeStr = item.labeled_at ? new Date(item.labeled_at).toLocaleString() : 'Unknown';
+                div.innerHTML = `
+                    <img src="/api/image/${item.id}" alt="Image">
+                    <div class="history-item-info">
+                        <div><strong>${item.path.split('/').pop()}</strong></div>
+                        <div class="history-item-label">Label: ${item.human_label}</div>
+                        <div class="history-item-time">${timeStr}</div>
+                    </div>
+                    <button onclick="relabelImage(${item.id})" style="padding: 8px 15px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer;">Relabel</button>
+                `;
+                historyList.appendChild(div);
+            }
+            
+            document.getElementById('historyModal').classList.add('active');
+        }
+        
+        function closeHistory() {
+            document.getElementById('historyModal').classList.remove('active');
+        }
+        
+        async function relabelImage(imageId) {
+            // This would require loading a specific image and allowing relabeling
+            // For now, just load next - the image will come back up if needed
+            closeHistory();
+            loadNext();
+        }
+        
         // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
             if (e.target.tagName === 'INPUT') return;
@@ -1015,6 +1162,8 @@ def get_inline_html():
             const key = e.key.toLowerCase();
             if (key === 'z') {
                 undoLast();
+            } else if (key === 'h') {
+                showHistory();
             } else if (KEY_MAP[key]) {
                 label(KEY_MAP[key]);
             }
