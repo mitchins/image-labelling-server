@@ -1,52 +1,85 @@
 # Image Labeling Server (smart_label)
 
-Fast start:
+Fast, configurable web UI for labeling images with keyboard shortcuts.
+
+## Read This First: Repo Layout and How to Run
+
+This repo root **is** the Python package. There is no nested `smart_label/` folder.
+That means:
+
+- If you run commands from the **parent directory**, `python -m smart_label ...` works.
+- If you run commands from **inside this repo**, install it first (`pip install -e .`).
+
+### Option A: Run from the parent directory (no install)
+
 ```bash
-python -m smart_label ingest-folder --images /path/to/images --labels cat,dog,other
+cd /data/anime-scene-extraction
+python -m smart_label --help
+python -m smart_label serve --db /path/to/queue.db
+```
+
+### Option B: Install editable (recommended for most users)
+
+```bash
+cd /data/anime-scene-extraction/smart_label
+python -m pip install -e .
+python -m smart_label serve --db /path/to/queue.db
+
+# Optional console script if installed:
+# image-labeling-server --db /path/to/queue.db
+```
+
+If you see `ModuleNotFoundError: No module named smart_label`, you are either:
+- in the wrong folder (run from the parent directory), or
+- missing the editable install (`pip install -e .`).
+
+## Quick Start (Pick One Ingestion Path)
+
+### 1) Folder of images (fastest path)
+
+```bash
+python -m smart_label ingest-folder \
+  --images /path/to/images \
+  --labels cat,dog,other
+
 python -m smart_label serve --db labeling_queue.db --config labeling_task.json
 # Open http://localhost:8765
 ```
 
-A reusable image labeling server with:
-- **Config-driven labels** - Use for any classification task via YAML/JSON config
-- **Embedding-based clustering** - Diverse sample selection
-- **Zero-friction web UI** - Keyboard shortcuts, auto-advance, image preloading
-- **History review** - Browse and relabel previous decisions
+### 2) JSONL list (paths + metadata + hints)
 
-## Fast Start (Folder + Class Names)
+Example JSONL line:
 
-If you have a folder of images and class names, this is the fastest path:
+```json
+{"path": "/data/images/img_001.jpg", "cluster_id": 12, "predicted_style": "modern", "predicted_confidence": 0.87, "series_name": "Show A", "production_year": 2018}
+```
+
+Ingest:
 
 ```bash
-# 1. Build a queue + config from a folder
-python -m smart_label ingest-folder \
-    --images /path/to/images \
-    --labels cat,dog,other
+python -m smart_label ingest-jsonl \
+  --jsonl /path/to/data.jsonl \
+  --labels cat,dog,other \
+  --metadata-fields series_name,production_year
 
-# 2. Start the server
 python -m smart_label serve --db labeling_queue.db --config labeling_task.json
-
-# 3. Open http://localhost:8765 and start labeling
 ```
 
-This creates:
-- `labeling_queue.db` with all image paths
-- `labeling_task.json` with your label list and task settings
+Notes:
+- `path` is required (use `--path-field` if your JSONL uses another key).
+- Relative paths can be resolved with `--base-dir /path/to/images`.
+- Optional hint fields: `predicted_style`, `predicted_confidence`.
+- Optional cluster field: `cluster_id` (enables replacement on refuse).
 
-## Quick Start (Clustering + Hints)
+### 3) Already have a queue DB
 
 ```bash
-# 1. Prepare queue (select diverse samples with clustering)
-python -m smart_label prepare --source ensemble_dataset_gold.json \
-    --clusters 80 --samples-per-cluster 13 --output smart_label/queue.db
-
-# 2. Launch server
-python -m smart_label serve --db smart_label/queue.db
-
-# 3. Open http://localhost:8765 and start labeling
+python -m smart_label serve --db /path/to/queue.db --config /path/to/task.json
 ```
 
-## Custom Tasks
+`serve` uses `--db` when provided, otherwise it falls back to `db_path` in the config.
+
+## Configure Any Task
 
 Create a config file to use Smart Label for any classification task:
 
@@ -62,8 +95,10 @@ label_colors:
   building: "#607D8B"
   other: "#757575"
 db_path: "my_queue.db"
-cluster_field: null  # Disable clustering if not needed
-hint_field: null     # Disable predictions if not available
+cluster_field: "cluster_id"        # Set null to disable clustering
+hint_field: "predicted_style"      # Set null to disable hints
+hint_confidence_field: "predicted_confidence"
+metadata_fields: ["series_name", "production_year"]
 ```
 
 ```bash
@@ -94,6 +129,7 @@ CREATE TABLE queue (
     labeled_at TIMESTAMP,
     quality_flag TEXT,             -- 'BAD_QUALITY' if marked
     session_id TEXT
+    -- plus any metadata columns you configured
 );
 ```
 
@@ -109,26 +145,9 @@ CREATE TABLE queue (
 | `/api/history/{id}/relabel` | POST | Change existing label |
 | `/api/export` | GET | Download all labels as JSON |
 
-## Configuration Options
-
-```python
-@dataclass
-class LabelConfig:
-    name: str                      # Task title
-    labels: list                   # Valid labels (1-9 map to these)
-    label_colors: dict             # Optional colors for UI
-    db_path: str                   # SQLite queue database
-    hint_field: Optional[str]      # Column with model prediction
-    cluster_field: Optional[str]   # Column for cluster-based replacement
-    metadata_fields: list          # Extra fields to show in UI
-    garbage_classifier_path: str   # Optional quality classifier
-```
-
-## Output
+## Export
 
 ```bash
-# Export labels
-python -m smart_label export --db smart_label/queue.db --output labels.json
-
+python -m smart_label export --db /path/to/queue.db --output labels.json
 # Format: [{"path": "/path/to/img.jpg", "label": "modern"}, ...]
 ```

@@ -5,6 +5,7 @@ CLI entry point for smart_label package.
 Usage:
     python -m smart_label prepare --source ... --output ...
     python -m smart_label ingest-folder --images ... --labels ...
+    python -m smart_label ingest-jsonl --jsonl ... --labels ...
     python -m smart_label serve --db ...
     python -m smart_label export --db ... --output ...
 """
@@ -21,6 +22,7 @@ def main():
 Commands:
   prepare   Generate diverse sample queue using embedding clustering
   ingest-folder  Create queue from a folder of images
+  ingest-jsonl   Create queue from a JSONL file
   serve     Start the labeling web server
   export    Export labeled data to JSON
   stats     Show labeling statistics
@@ -37,6 +39,12 @@ Examples:
       --classifier efficientnetv2_s_ultra_gold.pth \\
       --backbone efficientnetv2_s \\
       --output smart_label/queue.db
+
+  # Ingest a JSONL list of images + metadata
+  python -m smart_label ingest-jsonl \\
+      --jsonl data.jsonl \\
+      --labels cat,dog,other \\
+      --metadata-fields series_name,production_year
 
   # Start server
   python -m smart_label serve --db smart_label/queue.db
@@ -75,10 +83,29 @@ Examples:
     ingest.add_argument('--limit', type=int)
     ingest.add_argument('--shuffle', action=argparse.BooleanOptionalAction, default=True)
     ingest.add_argument('--absolute-paths', action=argparse.BooleanOptionalAction, default=True)
+
+    # Ingest-jsonl command
+    ingest_jsonl = subparsers.add_parser('ingest-jsonl', help='Create queue from a JSONL file')
+    ingest_jsonl.add_argument('--jsonl', required=True, help='Path to JSONL file')
+    ingest_jsonl.add_argument('--labels', required=True, help='Comma-separated list of class names')
+    ingest_jsonl.add_argument('--db', default='labeling_queue.db', help='Output database')
+    ingest_jsonl.add_argument('--config', default='labeling_task.json', help='Output config JSON file')
+    ingest_jsonl.add_argument('--name', default='Image Labeling Task', help='Task name shown in UI')
+    ingest_jsonl.add_argument('--description', default='', help='Optional task description')
+    ingest_jsonl.add_argument('--metadata-fields', default='', help='Comma-separated metadata fields')
+    ingest_jsonl.add_argument('--path-field', default='path', help='JSONL field name for image path')
+    ingest_jsonl.add_argument('--cluster-field', default='cluster_id', help='JSONL field name for cluster id')
+    ingest_jsonl.add_argument('--hint-field', default='predicted_style', help='JSONL field name for hint label')
+    ingest_jsonl.add_argument('--hint-confidence-field', default='predicted_confidence',
+                              help='JSONL field name for hint confidence')
+    ingest_jsonl.add_argument('--base-dir', default=None, help='Base dir for relative paths')
+    ingest_jsonl.add_argument('--absolute-paths', action=argparse.BooleanOptionalAction, default=True)
+    ingest_jsonl.add_argument('--limit', type=int)
+    ingest_jsonl.add_argument('--shuffle', action=argparse.BooleanOptionalAction, default=True)
     
     # Serve command
     serve = subparsers.add_parser('serve', help='Start labeling server')
-    serve.add_argument('--db', required=True, help='Queue database path')
+    serve.add_argument('--db', default=None, help='Queue database path')
     serve.add_argument('--port', type=int, default=8765, help='Server port')
     serve.add_argument('--host', default='0.0.0.0', help='Server host')
     
@@ -119,9 +146,35 @@ Examples:
         sys.argv.append('--absolute-paths' if args.absolute_paths else '--no-absolute-paths')
         ingest_main()
 
+    elif args.command == 'ingest-jsonl':
+        from smart_label.ingest_jsonl import main as ingest_jsonl_main
+        sys.argv = [
+            'ingest-jsonl',
+            f'--jsonl={args.jsonl}',
+            f'--labels={args.labels}',
+            f'--db={args.db}',
+            f'--config={args.config}',
+            f'--name={args.name}',
+            f'--description={args.description}',
+            f'--metadata-fields={args.metadata_fields}',
+            f'--path-field={args.path_field}',
+            f'--cluster-field={args.cluster_field}',
+            f'--hint-field={args.hint_field}',
+            f'--hint-confidence-field={args.hint_confidence_field}',
+        ]
+        if args.base_dir:
+            sys.argv.append(f'--base-dir={args.base_dir}')
+        if args.limit is not None:
+            sys.argv.append(f'--limit={args.limit}')
+        sys.argv.append('--shuffle' if args.shuffle else '--no-shuffle')
+        sys.argv.append('--absolute-paths' if args.absolute_paths else '--no-absolute-paths')
+        ingest_jsonl_main()
+
     elif args.command == 'serve':
         from smart_label.server import main as serve_main
-        sys.argv = ['serve', '--db', args.db, '--port', str(args.port), '--host', args.host]
+        sys.argv = ['serve', '--port', str(args.port), '--host', args.host]
+        if args.db:
+            sys.argv += ['--db', args.db]
         serve_main()
         
     elif args.command == 'export':

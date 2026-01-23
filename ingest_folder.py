@@ -182,7 +182,7 @@ def main():
     print(f"✓ Config written: {config_path}")
     print()
     print("Next:")
-    print(f"  python -m smart_label.server --db {db_path} --config {config_path}")
+    print(f"  python -m smart_label serve --db {db_path} --config {config_path}")
 
 
 if __name__ == "__main__":

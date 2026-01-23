@@ -945,7 +945,7 @@ def load_garbage_classifier_model(classifier_path: str):
 
 def main():
     parser = argparse.ArgumentParser(description='Smart Label - Configurable image labeling server')
-    parser.add_argument('--db', required=True, help='Path to queue database')
+    parser.add_argument('--db', default=None, help='Path to queue database (optional if config sets db_path)')
     parser.add_argument('--config', default=None, help='Path to config YAML/JSON (optional)')
     parser.add_argument('--port', type=int, default=8765, help='Server port')
     parser.add_argument('--host', default='0.0.0.0', help='Server host')
@@ -955,13 +955,7 @@ def main():
     args = parser.parse_args()
     
     global DB_PATH, CONFIG
-    DB_PATH = args.db
-    
-    if not Path(DB_PATH).exists():
-        print(f"Error: Database not found: {DB_PATH}")
-        print("Run prepare.py first to create the queue database")
-        return 1
-    
+
     # Load configuration
     if args.config:
         from .config import LabelConfig
@@ -972,6 +966,16 @@ def main():
         from .config import ANIME_STYLE_CONFIG
         CONFIG = ANIME_STYLE_CONFIG
         print("✓ Using default anime style config")
+
+    DB_PATH = args.db or getattr(CONFIG, "db_path", None)
+    if not DB_PATH:
+        print("Error: Database path not provided. Use --db or set db_path in the config.")
+        return 1
+
+    if not Path(DB_PATH).exists():
+        print(f"Error: Database not found: {DB_PATH}")
+        print("Run prepare.py or ingest to create the queue database")
+        return 1
     
     # Override garbage classifier from CLI if provided
     classifier_path = args.garbage_classifier or CONFIG.garbage_classifier_path
