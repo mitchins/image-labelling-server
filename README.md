@@ -1,4 +1,11 @@
-# Smart Label - Intelligent Human Labeling System
+# Image Labeling Server (smart_label)
+
+Fast start:
+```bash
+python -m smart_label ingest-folder --images /path/to/images --labels cat,dog,other
+python -m smart_label serve --db labeling_queue.db --config labeling_task.json
+# Open http://localhost:8765
+```
 
 A reusable image labeling server with:
 - **Config-driven labels** - Use for any classification task via YAML/JSON config
@@ -6,15 +13,35 @@ A reusable image labeling server with:
 - **Zero-friction web UI** - Keyboard shortcuts, auto-advance, image preloading
 - **History review** - Browse and relabel previous decisions
 
-## Quick Start
+## Fast Start (Folder + Class Names)
+
+If you have a folder of images and class names, this is the fastest path:
+
+```bash
+# 1. Build a queue + config from a folder
+python -m smart_label ingest-folder \
+    --images /path/to/images \
+    --labels cat,dog,other
+
+# 2. Start the server
+python -m smart_label serve --db labeling_queue.db --config labeling_task.json
+
+# 3. Open http://localhost:8765 and start labeling
+```
+
+This creates:
+- `labeling_queue.db` with all image paths
+- `labeling_task.json` with your label list and task settings
+
+## Quick Start (Clustering + Hints)
 
 ```bash
 # 1. Prepare queue (select diverse samples with clustering)
-python -m smart_label.prepare --source ensemble_dataset_gold.json \
+python -m smart_label prepare --source ensemble_dataset_gold.json \
     --clusters 80 --samples-per-cluster 13 --output smart_label/queue.db
 
 # 2. Launch server
-python -m smart_label.server --db smart_label/queue.db
+python -m smart_label serve --db smart_label/queue.db
 
 # 3. Open http://localhost:8765 and start labeling
 ```
@@ -40,7 +67,7 @@ hint_field: null     # Disable predictions if not available
 ```
 
 ```bash
-python -m smart_label.server --config my_task.yaml
+python -m smart_label serve --config my_task.yaml
 ```
 
 ## Keyboard Shortcuts
@@ -101,7 +128,7 @@ class LabelConfig:
 
 ```bash
 # Export labels
-python -m smart_label.export --db smart_label/queue.db --output labels.json
+python -m smart_label export --db smart_label/queue.db --output labels.json
 
 # Format: [{"path": "/path/to/img.jpg", "label": "modern"}, ...]
 ```

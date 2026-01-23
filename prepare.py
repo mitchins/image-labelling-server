@@ -305,6 +305,7 @@ def create_database(db_path: str, samples: list, embeddings: np.ndarray = None):
             embedding BLOB,
             human_label TEXT,
             labeled_at TIMESTAMP,
+            quality_flag TEXT,
             session_id TEXT
         );
         
