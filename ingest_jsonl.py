@@ -12,6 +12,7 @@ import json
 import random
 import sqlite3
 from pathlib import Path
+from typing import Optional
 
 from config import LabelConfig
 from ingest_folder import write_config
@@ -132,7 +133,7 @@ def load_jsonl(
     metadata_fields: list,
     base_dir: Path,
     absolute_paths: bool,
-    media_type: str | None,
+    media_type: Optional[str],
 ):
     items = []
     with jsonl_path.open("r", encoding="utf-8") as f:

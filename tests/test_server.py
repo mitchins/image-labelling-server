@@ -33,12 +33,12 @@ def test_db():
     
     # Insert test data
     conn.execute("""
-        INSERT INTO queue (path, cluster_id, predicted_style, predicted_confidence)
+        INSERT INTO queue (path, media_type, cluster_id, predicted_style, predicted_confidence)
         VALUES (?, ?, ?, ?, ?)
     """, ("/test/image1.jpg", "image", 1, "modern", 0.8))
     
     conn.execute("""
-        INSERT INTO queue (path, cluster_id, predicted_style, predicted_confidence, 
+        INSERT INTO queue (path, media_type, cluster_id, predicted_style, predicted_confidence, 
                           human_label, labeled_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, ("/test/image2.jpg", "image", 2, "moe", 0.9, "moe", "2024-01-01T12:00:00"))

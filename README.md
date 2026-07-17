@@ -4,11 +4,9 @@ Fast, configurable web UI for labeling images or short audio clips with keyboard
 
 ## Read This First: Repo Layout and How to Run
 
-This repo root **is** the Python package. There is no nested `smart_label/` folder.
-That means:
-
-- If you run commands from the **parent directory**, `python -m smart_label ...` works.
-- If you run commands from **inside this repo**, install it first (`pip install -e .`).
+The repository includes the installable `smart_label` package and can be used from
+any working directory after installation. A source checkout can also be run directly
+from its parent directory.
 
 ### Option A: Run from the parent directory (no install)
 
@@ -18,20 +16,19 @@ python -m smart_label --help
 python -m smart_label serve --db /path/to/queue.db
 ```
 
-### Option B: Install editable (recommended for most users)
+### Option B: Install the package (recommended for Linux and production use)
 
 ```bash
 cd /data/anime-scene-extraction/smart_label
-python -m pip install -e .
+python -m pip install .
 python -m smart_label serve --db /path/to/queue.db
 
 # Optional console script if installed:
 # image-labeling-server --db /path/to/queue.db
 ```
 
-If you see `ModuleNotFoundError: No module named smart_label`, you are either:
-- in the wrong folder (run from the parent directory), or
-- missing the editable install (`pip install -e .`).
+If you see `ModuleNotFoundError: No module named smart_label`, install the package
+from the repository root with `python -m pip install .`.
 
 ## Labels and Config (Single Source of Truth)
 

@@ -63,8 +63,24 @@ where = ["."]
 include = ["smart_label*"]
 exclude = ["tests*", "*.egg-info"]
 
+# The compatibility package delegates to these existing root-level modules.
+# Include them in wheels as well as source checkouts.
+[tool.setuptools]
+py-modules = [
+    "config",
+    "export",
+    "ingest_audio",
+    "ingest_folder",
+    "ingest_jsonl",
+    "media_utils",
+    "prepare",
+]
+
+[tool.setuptools.package-data]
+smart_label = ["static/*"]
+
 [tool.pytest.ini_options]
-testpaths = ["smart_label/tests"]
+testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
