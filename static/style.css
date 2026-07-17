@@ -107,6 +107,131 @@ body {
     gap: 16px;
 }
 
+.last-decision {
+    min-height: 36px;
+    padding: 8px 20px;
+    text-align: center;
+    color: var(--text-secondary);
+    background: var(--bg-card);
+    border-top: 1px solid var(--border);
+}
+
+.last-decision strong {
+    color: var(--text-primary);
+}
+
+.confirmation-card {
+    width: min(760px, 94vw);
+    padding: 28px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    text-align: center;
+}
+
+.confirmation-question {
+    font-size: 24px;
+    font-weight: 600;
+    margin-bottom: 14px;
+}
+
+.indicative-value {
+    color: var(--accent-blue);
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 18px;
+}
+
+.confirmation-meta {
+    margin: 0 0 22px;
+    padding: 12px 16px;
+    background: var(--bg-hover);
+    border-radius: 8px;
+    text-align: left;
+}
+
+.confirmation-meta-row {
+    display: grid;
+    grid-template-columns: minmax(100px, 0.3fr) 1fr;
+    gap: 12px;
+    padding: 5px 0;
+}
+
+.confirmation-meta dt {
+    color: var(--text-secondary);
+    text-transform: capitalize;
+}
+
+.confirmation-meta dd {
+    margin: 0;
+    white-space: pre-wrap;
+}
+
+.ontology-list {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 24px;
+}
+
+.ontology-entry {
+    padding: 8px 12px;
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.ontology-entry small {
+    color: var(--text-secondary);
+}
+
+.confirmation-buttons,
+.confirmation-history-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
+.confirmation-btn { flex: 1 1 140px; }
+.confirmation-strong { background: var(--accent-green); color: white; }
+.confirmation-loose { background: #1976D2; color: white; }
+.confirmation-none { background: #607D8B; color: white; }
+.confirmation-invalid { background: var(--accent-red); color: white; }
+
+.confirmation-receipt { display: none; }
+
+.confirmation-history-item {
+    padding: 14px;
+    background: var(--bg-hover);
+    border-radius: 8px;
+    display: flex;
+    justify-content: space-between;
+    gap: 14px;
+    align-items: center;
+}
+
+.confirmation-history-media {
+    flex: 0 1 280px;
+}
+
+.confirmation-history-media audio,
+.confirmation-history-media img {
+    width: 100%;
+    max-height: 150px;
+    object-fit: contain;
+}
+
+.confirmation-history-summary {
+    min-width: 160px;
+}
+
+.history-outcome {
+    margin-left: 10px;
+    color: var(--accent-blue);
+}
+
 .loading {
     text-align: center;
     color: var(--text-secondary);

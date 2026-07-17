@@ -94,7 +94,10 @@ Examples:
     # Ingest-jsonl command
     ingest_jsonl = subparsers.add_parser('ingest-jsonl', help='Create queue from a JSONL file')
     ingest_jsonl.add_argument('--jsonl', required=True, help='Path to JSONL file')
-    ingest_jsonl.add_argument('--labels', required=True, help='Comma-separated list of class names')
+    ingest_jsonl.add_argument('--mode', choices=['classification', 'ontology-confirmation'], default='classification')
+    ingest_jsonl.add_argument('--ontology', help='JSON/YAML ontology definition')
+    ingest_jsonl.add_argument('--indicative-field', default='indicative_value')
+    ingest_jsonl.add_argument('--labels', required=False, default='', help='Comma-separated list of class names')
     ingest_jsonl.add_argument('--db', default='labeling_queue.db', help='Output database')
     ingest_jsonl.add_argument('--config', default='labeling_task.json', help='Output config JSON file')
     ingest_jsonl.add_argument('--name', default='Media Labeling Task', help='Task name shown in UI')
@@ -128,6 +131,7 @@ Examples:
     # Serve command
     serve = subparsers.add_parser('serve', help='Start labeling server')
     serve.add_argument('--db', default=None, help='Queue database path')
+    serve.add_argument('--config', default=None, help='Task config YAML/JSON path')
     serve.add_argument('--port', type=int, default=8765, help='Server port')
     serve.add_argument('--host', default='0.0.0.0', help='Server host')
     
@@ -173,6 +177,7 @@ Examples:
         sys.argv = [
             'ingest-jsonl',
             f'--jsonl={args.jsonl}',
+            f'--mode={args.mode}',
             f'--labels={args.labels}',
             f'--db={args.db}',
             f'--config={args.config}',
@@ -184,7 +189,10 @@ Examples:
             f'--cluster-field={args.cluster_field}',
             f'--hint-field={args.hint_field}',
             f'--hint-confidence-field={args.hint_confidence_field}',
+            f'--indicative-field={args.indicative_field}',
         ]
+        if args.ontology:
+            sys.argv.append(f'--ontology={args.ontology}')
         if args.base_dir:
             sys.argv.append(f'--base-dir={args.base_dir}')
         if args.limit is not None:
@@ -217,6 +225,8 @@ Examples:
         sys.argv = ['serve', '--port', str(args.port), '--host', args.host]
         if args.db:
             sys.argv += ['--db', args.db]
+        if args.config:
+            sys.argv += ['--config', args.config]
         serve_main()
         
     elif args.command == 'export':
@@ -234,47 +244,27 @@ def export_labels(db_path: str, output_path: str, exclude_refuse: bool = False):
     import json
     import sqlite3
     from pathlib import Path
+    from export_utils import build_export_payload
     
     if not Path(db_path).exists():
         print(f"Error: Database not found: {db_path}")
         return
     
     conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    
-    query = """
-        SELECT path, human_label, cluster_id, predicted_style, labeled_at
-        FROM queue
-        WHERE human_label IS NOT NULL
-    """
-    if exclude_refuse:
-        query += " AND human_label != 'REFUSE'"
-    
-    cur.execute(query)
-    
-    labels = [
-        {
-            "path": row["path"],
-            "label": row["human_label"],
-            "cluster_id": row["cluster_id"],
-            "predicted_style": row["predicted_style"],
-            "labeled_at": row["labeled_at"]
-        }
-        for row in cur.fetchall()
-    ]
-    
+    payload = build_export_payload(conn, exclude_refuse=exclude_refuse)
     conn.close()
     
     with open(output_path, 'w') as f:
-        json.dump(labels, f, indent=2)
+        json.dump(payload, f, indent=2)
     
-    print(f"Exported {len(labels)} labels to {output_path}")
+    items = payload["items"] if isinstance(payload, dict) else payload
+    print(f"Exported {len(items)} decisions to {output_path}")
     
     # Show distribution
     from collections import Counter
-    dist = Counter(l['label'] for l in labels)
-    print("\nLabel distribution:")
+    decision_key = "confirmation" if isinstance(payload, dict) else "label"
+    dist = Counter(item[decision_key] for item in items)
+    print("\nDecision distribution:")
     for label, count in sorted(dist.items()):
         print(f"  {label}: {count}")
 
@@ -291,35 +281,45 @@ def show_stats(db_path: str):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
+    settings = {}
+    if cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'").fetchone():
+        import json
+        for key, raw_value in cur.execute("SELECT key, value FROM settings"):
+            try:
+                settings[key] = json.loads(raw_value)
+            except (json.JSONDecodeError, TypeError):
+                settings[key] = raw_value
+    status_column = "confirmation" if settings.get("mode") == "ontology_confirmation" else "human_label"
     
     # Total
     cur.execute("SELECT COUNT(*) FROM queue")
     total = cur.fetchone()[0]
     
-    cur.execute("SELECT COUNT(*) FROM queue WHERE human_label IS NOT NULL")
+    cur.execute(f"SELECT COUNT(*) FROM queue WHERE {status_column} IS NOT NULL")
     labeled = cur.fetchone()[0]
     
-    print(f"Progress: {labeled} / {total} ({100*labeled/total:.1f}%)")
+    percent = 100 * labeled / total if total else 0
+    print(f"Progress: {labeled} / {total} ({percent:.1f}%)")
     print()
     
     # By label
-    cur.execute("""
-        SELECT human_label, COUNT(*) as count
+    cur.execute(f"""
+        SELECT {status_column}, COUNT(*) as count
         FROM queue
-        WHERE human_label IS NOT NULL
-        GROUP BY human_label
+        WHERE {status_column} IS NOT NULL
+        GROUP BY {status_column}
         ORDER BY count DESC
     """)
     
     print("By label:")
     for row in cur.fetchall():
-        print(f"  {row['human_label']}: {row['count']}")
+        print(f"  {row[status_column]}: {row['count']}")
     
     # By cluster (sampled)
-    cur.execute("""
+    cur.execute(f"""
         SELECT cluster_id, 
                COUNT(*) as total,
-               SUM(CASE WHEN human_label IS NOT NULL THEN 1 ELSE 0 END) as labeled
+               SUM(CASE WHEN {status_column} IS NOT NULL THEN 1 ELSE 0 END) as labeled
         FROM queue
         GROUP BY cluster_id
         ORDER BY cluster_id

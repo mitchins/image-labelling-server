@@ -69,6 +69,7 @@ exclude = ["tests*", "*.egg-info"]
 py-modules = [
     "config",
     "export",
+    "export_utils",
     "ingest_audio",
     "ingest_folder",
     "ingest_jsonl",

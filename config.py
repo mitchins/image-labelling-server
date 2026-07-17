@@ -11,6 +11,55 @@ import json
 import yaml
 
 
+METADATA_JSON_PREFIX = "smart-label-json:"
+
+
+QUEUE_COLUMNS = {
+    "id", "path", "media_type", "cluster_id", "predicted_style",
+    "predicted_confidence", "human_label", "labeled_at", "quality_flag",
+    "session_id", "indicative_value", "confirmation", "confirmation_at",
+    "confirmation_session_id",
+}
+
+
+def validate_metadata_fields(fields: list) -> list:
+    """Reject duplicate, malformed, or schema-colliding metadata columns."""
+    if not isinstance(fields, list):
+        raise ValueError("metadata_fields must be a list")
+    if any(not isinstance(field, str) or not field.isidentifier() for field in fields):
+        raise ValueError("Metadata fields must be valid identifier names")
+    if len(fields) != len(set(fields)):
+        raise ValueError("Metadata fields must be unique")
+    collisions = QUEUE_COLUMNS.intersection(fields)
+    if collisions:
+        raise ValueError(f"Metadata fields collide with queue columns: {sorted(collisions)}")
+    return fields
+
+
+def quote_identifier(value: str) -> str:
+    """Quote a previously validated SQLite identifier."""
+    if not isinstance(value, str) or not value.isidentifier():
+        raise ValueError(f"Invalid SQL identifier: {value!r}")
+    return '"' + value.replace('"', '""') + '"'
+
+
+def encode_metadata_value(value):
+    """Encode typed metadata without confusing it with legacy plain text."""
+    if value is None:
+        return None
+    return METADATA_JSON_PREFIX + json.dumps(value, separators=(",", ":"))
+
+
+def decode_metadata_value(value):
+    """Decode marked metadata and preserve all unmarked legacy strings."""
+    if not isinstance(value, str) or not value.startswith(METADATA_JSON_PREFIX):
+        return value
+    try:
+        return json.loads(value[len(METADATA_JSON_PREFIX):])
+    except json.JSONDecodeError:
+        return value
+
+
 @dataclass
 class LabelConfig:
     """Configuration for a labeling task."""
@@ -18,6 +67,10 @@ class LabelConfig:
     # Task identity
     name: str = "Labeling Task"
     description: str = ""
+    mode: str = "classification"
+    ontology_id: Optional[str] = None
+    ontology_version: Optional[str] = None
+    ontology: list = field(default_factory=list)
     
     # Labels: list of valid label names (order determines keyboard shortcuts 1-9)
     labels: list = field(default_factory=lambda: ["label_1", "label_2", "label_3"])
@@ -50,6 +103,29 @@ class LabelConfig:
     # Server settings
     host: str = "0.0.0.0"
     port: int = 8765
+
+    def __post_init__(self):
+        validate_metadata_fields(self.metadata_fields)
+        if self.mode not in {"classification", "ontology_confirmation"}:
+            raise ValueError(f"Unsupported labeling mode: {self.mode}")
+        if self.mode == "ontology_confirmation":
+            if not self.ontology_id or not self.ontology_version:
+                raise ValueError("Confirmation mode requires ontology_id and ontology_version")
+            if not self.ontology:
+                raise ValueError("Confirmation mode requires at least one ontology value")
+            ids = []
+            for entry in self.ontology:
+                if (
+                    not isinstance(entry, dict)
+                    or not isinstance(entry.get("id"), str)
+                    or not entry["id"].strip()
+                    or not isinstance(entry.get("display_name"), str)
+                    or not entry["display_name"].strip()
+                ):
+                    raise ValueError("Ontology entries require stable id and display_name values")
+                ids.append(entry["id"])
+            if len(ids) != len(set(ids)):
+                raise ValueError("Ontology entry ids must be unique")
     
     @classmethod
     def from_file(cls, path: str) -> "LabelConfig":
@@ -72,6 +148,10 @@ class LabelConfig:
         return {
             "name": self.name,
             "description": self.description,
+            "mode": self.mode,
+            "ontology_id": self.ontology_id,
+            "ontology_version": self.ontology_version,
+            "ontology": self.ontology,
             "labels": self.labels,
             "label_colors": self.label_colors,
             "media_type": self.media_type,

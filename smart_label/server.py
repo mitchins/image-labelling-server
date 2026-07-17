@@ -25,6 +25,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
+from config import decode_metadata_value, quote_identifier, validate_metadata_fields
+from export_utils import build_export_payload
 from media_utils import guess_media_type_from_path, guess_mime_type
 
 # Lazy imports for optional heavy dependencies
@@ -35,6 +37,8 @@ timm = None
 DB_PATH: str = None
 GARBAGE_CLASSIFIER = None
 CONFIG = None  # LabelConfig instance
+
+CONFIRMATIONS = {"STRONG", "LOOSE", "NONE", "INVALID"}
 
 app = FastAPI(title="Smart Label", description="Configurable image labeling")
 
@@ -61,6 +65,18 @@ def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
+        # Keep old databases usable while allowing confirmation fields to be
+        # introduced without requiring a data migration.
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(queue)")
+        columns = {row[1] for row in cur.fetchall()}
+        for name in ("indicative_value", "confirmation", "confirmation_at", "confirmation_session_id"):
+            if name not in columns:
+                cur.execute(f"ALTER TABLE queue ADD COLUMN {name} TEXT")
+        cur.execute("""CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY, last_activity TIMESTAMP, labels_count INTEGER DEFAULT 0
+        )""")
+        conn.commit()
         yield conn
     finally:
         conn.close()
@@ -68,10 +84,10 @@ def get_db():
 
 def build_select_columns() -> str:
     """Build SELECT clause with base columns and optional metadata."""
-    cols = ["id", "path", "media_type", "cluster_id", "predicted_style", "predicted_confidence"]
+    cols = ["id", "path", "media_type", "cluster_id", "predicted_style", "predicted_confidence", "indicative_value", "confirmation"]
     
     if CONFIG and CONFIG.metadata_fields:
-        cols.extend(CONFIG.metadata_fields)
+        cols.extend(quote_identifier(field) for field in validate_metadata_fields(CONFIG.metadata_fields))
     
     return ", ".join(cols)
 
@@ -129,6 +145,10 @@ def load_config_from_db(db_path: str):
     return LabelConfig(
         name=settings.get("name") or "Labeling Task",
         description=settings.get("description") or "",
+        mode=settings.get("mode") or "classification",
+        ontology_id=settings.get("ontology_id"),
+        ontology_version=settings.get("ontology_version"),
+        ontology=settings.get("ontology") or [],
         labels=labels,
         label_colors=label_colors,
         db_path=db_path,
@@ -144,9 +164,10 @@ def load_config_from_db(db_path: str):
 def safe_get_metadata(row, field: str):
     """Safely get metadata field from row, returning None if column doesn't exist."""
     try:
-        return row[field]
+        value = row[field]
     except IndexError:
         return None
+    return decode_metadata_value(value)
 
 
 def build_image_response(row) -> dict:
@@ -162,16 +183,19 @@ def build_image_response(row) -> dict:
     
     if CONFIG and CONFIG.metadata_fields:
         for field in CONFIG.metadata_fields:
-            try:
-                response[field] = row[field]
-            except IndexError:
-                response[field] = None
+            response[field] = safe_get_metadata(row, field)
     
     return response
 
 
 def get_progress_stats(cur):
     """Get progress stats - only counts actual labels (1-6), not REFUSE."""
+    if is_confirmation_mode():
+        cur.execute("SELECT COUNT(*) FROM queue")
+        total = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM queue WHERE confirmation IS NOT NULL")
+        labeled = cur.fetchone()[0]
+        return {"labeled": labeled, "total": total, "percent": round(100 * labeled / total, 1) if total else 0}
     cur.execute("SELECT COUNT(*) FROM queue")
     total = cur.fetchone()[0]
     cur.execute("""
@@ -186,18 +210,51 @@ def get_progress_stats(cur):
     }
 
 
+def confirmation_config():
+    if not CONFIG or getattr(CONFIG, "mode", "classification") != "ontology_confirmation":
+        return None
+    return {
+        "ontology_id": getattr(CONFIG, "ontology_id", None),
+        "ontology_version": getattr(CONFIG, "ontology_version", None),
+        "ontology": getattr(CONFIG, "ontology", []) or [],
+    }
+
+
+def is_confirmation_mode():
+    return confirmation_config() is not None
+
+
+def ontology_values():
+    config = confirmation_config() or {}
+    return [entry.get("id") for entry in config.get("ontology", []) if isinstance(entry, dict)]
+
+
+def confirmation_response(row):
+    response = build_image_response(row)
+    if is_confirmation_mode():
+        response["indicative_value"] = row["indicative_value"]
+    return response
+
+
+def pending_clause():
+    return "confirmation IS NULL" if is_confirmation_mode() else "human_label IS NULL"
+
+
 class LabelRequest(BaseModel):
     """Request to label an image."""
     image_id: int
-    label: str  # One of the configured labels or REFUSE
+    label: Optional[str] = None  # One of the configured labels or REFUSE
     quality_flag: Optional[str] = None  # Optional flag (e.g., BAD_QUALITY)
     session_id: Optional[str] = None
+    confirmation: Optional[str] = None
 
 
 class RelabelRequest(BaseModel):
     """Request to relabel a previously labeled image (image_id from path)."""
-    label: str  # One of the configured labels or REFUSE
+    label: Optional[str] = None  # One of the configured labels or REFUSE
     quality_flag: Optional[str] = None  # Optional flag (e.g., BAD_QUALITY)
+    confirmation: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 class StatsResponse(BaseModel):
@@ -244,10 +301,10 @@ async def get_next_image(session_id: str = Query(default=None)):
         cur.execute(f"""
             SELECT {select_cols}
             FROM queue
-            WHERE human_label IS NULL
+            WHERE {pending_clause()}
             ORDER BY RANDOM()
             LIMIT 1
-        """)
+        """ )
         row = cur.fetchone()
         
         if not row:
@@ -256,7 +313,7 @@ async def get_next_image(session_id: str = Query(default=None)):
         # Get stats (only count 1-6 labels, not REFUSE)
         progress = get_progress_stats(cur)
         
-        response = build_image_response(row)
+        response = confirmation_response(row)
         response["done"] = False
         response["progress"] = progress
         return response
@@ -272,14 +329,14 @@ async def get_batch(count: int = Query(default=5, le=20)):
         cur.execute(f"""
             SELECT {select_cols}
             FROM queue
-            WHERE human_label IS NULL
+            WHERE {pending_clause()}
             ORDER BY RANDOM()
             LIMIT ?
         """, (count,))
         rows = cur.fetchall()
         
         return {
-            "images": [build_image_response(row) for row in rows]
+            "images": [confirmation_response(row) for row in rows]
         }
 
 
@@ -296,7 +353,7 @@ async def get_replacement(cluster_id: str = PathParam(..., description="Cluster 
             cur.execute(f"""
                 SELECT {select_cols}
                 FROM queue
-                WHERE human_label IS NULL
+                WHERE {pending_clause()}
                 ORDER BY RANDOM()
                 LIMIT 1
             """)
@@ -313,7 +370,7 @@ async def get_replacement(cluster_id: str = PathParam(..., description="Cluster 
                 cur.execute(f"""
                     SELECT {select_cols}
                     FROM queue
-                    WHERE human_label IS NULL
+                    WHERE {pending_clause()}
                     ORDER BY RANDOM()
                     LIMIT 1
                 """)
@@ -326,7 +383,7 @@ async def get_replacement(cluster_id: str = PathParam(..., description="Cluster 
                 cur.execute(f"""
                     SELECT {select_cols}
                     FROM queue
-                    WHERE cluster_id = ? AND human_label IS NULL
+                    WHERE cluster_id = ? AND {pending_clause()}
                     ORDER BY RANDOM()
                     LIMIT 1
                 """, (cluster_id_int,))
@@ -337,7 +394,7 @@ async def get_replacement(cluster_id: str = PathParam(..., description="Cluster 
                     cur.execute(f"""
                         SELECT {select_cols}
                         FROM queue
-                        WHERE human_label IS NULL
+                        WHERE {pending_clause()}
                         ORDER BY RANDOM()
                         LIMIT 1
                     """)
@@ -349,7 +406,7 @@ async def get_replacement(cluster_id: str = PathParam(..., description="Cluster 
         # Get stats (only count 1-6 labels, not REFUSE)
         progress = get_progress_stats(cur)
         
-        response = build_image_response(row)
+        response = confirmation_response(row)
         response["done"] = False
         response["progress"] = progress
         return response
@@ -359,6 +416,32 @@ async def get_replacement(cluster_id: str = PathParam(..., description="Cluster 
 @app.post("/api/label")
 async def label_image(request: LabelRequest):
     """Label an item."""
+    if is_confirmation_mode():
+        if request.confirmation not in CONFIRMATIONS:
+            raise HTTPException(status_code=400, detail="Invalid confirmation")
+        session_id = request.session_id or str(uuid.uuid4())
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT indicative_value, confirmation FROM queue WHERE id = ?", (request.image_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Item not found")
+            if row["indicative_value"] not in ontology_values():
+                raise HTTPException(status_code=400, detail="Row ontology value is not in configured ontology")
+            cur.execute("""UPDATE queue SET confirmation = ?, confirmation_at = ?,
+                confirmation_session_id = ? WHERE id = ? AND confirmation IS NULL""",
+                (request.confirmation, datetime.now().isoformat(), session_id, request.image_id))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=409, detail="Item already confirmed; reload for the next item")
+            cur.execute("""
+                INSERT INTO sessions (id, last_activity, labels_count)
+                VALUES (?, ?, 1)
+                ON CONFLICT(id) DO UPDATE SET
+                    last_activity = excluded.last_activity,
+                    labels_count = labels_count + 1
+            """, (session_id, datetime.now().isoformat()))
+            conn.commit()
+            return {"success": True, "session_id": session_id, "progress": get_progress_stats(cur)}
     valid_labels = get_valid_labels()
     if request.label not in valid_labels:
         raise HTTPException(status_code=400, detail=f"Invalid label: {request.label}. Valid: {valid_labels}")
@@ -411,23 +494,25 @@ async def get_stats():
         cur.execute("SELECT COUNT(*) FROM queue")
         total = cur.fetchone()[0]
         
-        cur.execute("SELECT COUNT(*) FROM queue WHERE human_label IS NOT NULL")
+        status_column = "confirmation" if is_confirmation_mode() else "human_label"
+        cur.execute(f"SELECT COUNT(*) FROM queue WHERE {status_column} IS NOT NULL")
         labeled = cur.fetchone()[0]
         
         # By label
-        cur.execute("""
-            SELECT human_label, COUNT(*) as count
+        cur.execute(f"""
+            SELECT {status_column}, COUNT(*) as count
             FROM queue
-            WHERE human_label IS NOT NULL
-            GROUP BY human_label
+            WHERE {status_column} IS NOT NULL
+            GROUP BY {status_column}
         """)
-        by_label = {row["human_label"]: row["count"] for row in cur.fetchall()}
+        key = status_column
+        by_label = {row[key]: row["count"] for row in cur.fetchall()}
         
         # By cluster (labeled count)
-        cur.execute("""
+        cur.execute(f"""
             SELECT cluster_id, COUNT(*) as count
             FROM queue
-            WHERE human_label IS NOT NULL
+            WHERE {status_column} IS NOT NULL
             GROUP BY cluster_id
             ORDER BY cluster_id
         """)
@@ -479,27 +564,7 @@ async def get_image(image_id: int):
 async def export_labels():
     """Export all labeled data as JSON."""
     with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT path, media_type, human_label, cluster_id, predicted_style, labeled_at
-            FROM queue
-            WHERE human_label IS NOT NULL
-            ORDER BY labeled_at
-        """)
-        
-        labels = [
-            {
-                "path": row["path"],
-                "media_type": row["media_type"] if "media_type" in row.keys() else guess_media_type_from_path(row["path"]),
-                "label": row["human_label"],
-                "cluster_id": row["cluster_id"],
-                "predicted_style": row["predicted_style"],
-                "labeled_at": row["labeled_at"]
-            }
-            for row in cur.fetchall()
-        ]
-        
-        return JSONResponse(labels)
+        return JSONResponse(build_export_payload(conn, config=CONFIG))
 
 
 @app.get("/api/config")
@@ -530,11 +595,12 @@ async def get_history(
         offset = (page - 1) * per_page
         
         # Build query with optional label filter
-        where_clause = "WHERE human_label IS NOT NULL"
+        status_column = "confirmation" if is_confirmation_mode() else "human_label"
+        where_clause = f"WHERE {status_column} IS NOT NULL"
         params = []
         
         if label_filter:
-            where_clause += " AND human_label = ?"
+            where_clause += f" AND {status_column} = ?"
             params.append(label_filter)
         
         # Get total count
@@ -542,16 +608,17 @@ async def get_history(
         total = cur.fetchone()[0]
         
         # Build select with metadata
-        select_cols = "id, path, media_type, human_label, cluster_id, predicted_style, predicted_confidence, labeled_at, quality_flag"
+        select_cols = "id, path, media_type, human_label, cluster_id, predicted_style, predicted_confidence, labeled_at, quality_flag, indicative_value, confirmation, confirmation_at, confirmation_session_id"
         if CONFIG and CONFIG.metadata_fields:
-            select_cols += ", " + ", ".join(CONFIG.metadata_fields)
+            metadata_fields = validate_metadata_fields(CONFIG.metadata_fields)
+            select_cols += ", " + ", ".join(quote_identifier(field) for field in metadata_fields)
         
         # Get page of results
         cur.execute(f"""
             SELECT {select_cols}
             FROM queue
             {where_clause}
-            ORDER BY labeled_at DESC
+            ORDER BY {"confirmation_at" if is_confirmation_mode() else "labeled_at"} DESC, id DESC
             LIMIT ? OFFSET ?
         """, params + [per_page, offset])
         
@@ -561,21 +628,22 @@ async def get_history(
                 "id": row["id"],
                 "path": row["path"],
                 "media_type": row["media_type"] if "media_type" in row.keys() else guess_media_type_from_path(row["path"]),
-                "label": row["human_label"],
+                "label": row[status_column],
                 "cluster_id": row["cluster_id"],
                 "predicted_style": row["predicted_style"],
                 "predicted_confidence": row["predicted_confidence"],
                 "labeled_at": row["labeled_at"],
                 "quality_flag": row["quality_flag"],
             }
+            if is_confirmation_mode():
+                item.update({"indicative_value": row["indicative_value"], "confirmation": row["confirmation"],
+                    "confirmation_at": row["confirmation_at"], "confirmation_session_id": row["confirmation_session_id"],
+                    "ontology_id": confirmation_config().get("ontology_id"), "ontology_version": confirmation_config().get("ontology_version")})
             
             # Add metadata fields
             if CONFIG and CONFIG.metadata_fields:
                 for field in CONFIG.metadata_fields:
-                    try:
-                        item[field] = row[field]
-                    except IndexError:
-                        item[field] = None
+                    item[field] = safe_get_metadata(row, field)
             
             items.append(item)
         
@@ -591,6 +659,23 @@ async def get_history(
 @app.post("/api/history/{image_id}/relabel")
 async def relabel_from_history(image_id: int, request: RelabelRequest):
     """Change label for a previously labeled image."""
+    if is_confirmation_mode():
+        if request.confirmation not in CONFIRMATIONS:
+            raise HTTPException(status_code=400, detail="Invalid confirmation")
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT confirmation, indicative_value FROM queue WHERE id = ?", (image_id,))
+            row = cur.fetchone()
+            if not row or row["confirmation"] is None:
+                raise HTTPException(status_code=400, detail="Image was not previously confirmed")
+            if row["indicative_value"] not in ontology_values():
+                raise HTTPException(status_code=400, detail="Row ontology value is not in configured ontology")
+            session_id = request.session_id if hasattr(request, "session_id") else None
+            session_id = session_id or str(uuid.uuid4())
+            cur.execute("UPDATE queue SET confirmation = ?, confirmation_at = ?, confirmation_session_id = ? WHERE id = ?",
+                (request.confirmation, datetime.now().isoformat(), session_id, image_id))
+            conn.commit()
+            return {"success": True, "image_id": image_id, "confirmation": request.confirmation, "session_id": session_id}
     valid_labels = get_valid_labels()
     if request.label not in valid_labels:
         raise HTTPException(status_code=400, detail=f"Invalid label: {request.label}")
@@ -702,15 +787,20 @@ async def undo_last(session_id: Optional[str] = Query(default=None)):
         cur = conn.cursor()
         
         # Find most recent
-        query = """
-            SELECT id, path FROM queue
-            WHERE human_label IS NOT NULL
-        """
-        params = []
-        if session_id:
+        if is_confirmation_mode():
+            select_cols = build_select_columns()
+            query = f"""SELECT {select_cols}, confirmation_at, confirmation_session_id FROM queue
+                WHERE confirmation IS NOT NULL AND confirmation_session_id = ?
+                ORDER BY confirmation_at DESC LIMIT 1"""
+            params = [session_id]
+        else:
+            query = """SELECT id, path FROM queue WHERE human_label IS NOT NULL"""
+            params = []
+        if not is_confirmation_mode() and session_id:
             query += " AND session_id = ?"
             params.append(session_id)
-        query += " ORDER BY labeled_at DESC LIMIT 1"
+        if not is_confirmation_mode():
+            query += " ORDER BY labeled_at DESC LIMIT 1"
         cur.execute(query, params)
         row = cur.fetchone()
         
@@ -718,14 +808,25 @@ async def undo_last(session_id: Optional[str] = Query(default=None)):
             return {"success": False, "message": "Nothing to undo"}
         
         # Clear it
-        cur.execute("""
-            UPDATE queue
-            SET human_label = NULL, labeled_at = NULL, quality_flag = NULL, session_id = NULL
-            WHERE id = ?
-        """, (row["id"],))
+        if is_confirmation_mode():
+            cur.execute("""UPDATE queue SET confirmation = NULL, confirmation_at = NULL,
+                confirmation_session_id = NULL
+                WHERE id = ? AND confirmation_session_id = ? AND confirmation_at = ?""",
+                (row["id"], row["confirmation_session_id"], row["confirmation_at"]))
+            if cur.rowcount == 0:
+                return {"success": False, "message": "Decision changed before undo; history was preserved"}
+        else:
+            cur.execute("""UPDATE queue SET human_label = NULL, labeled_at = NULL,
+                quality_flag = NULL, session_id = NULL WHERE id = ?""", (row["id"],))
         conn.commit()
-        
-        return {"success": True, "undone_id": row["id"], "path": row["path"]}
+
+        response = {"success": True, "undone_id": row["id"], "path": row["path"]}
+        if is_confirmation_mode():
+            item = confirmation_response(row)
+            item["done"] = False
+            item["progress"] = get_progress_stats(cur)
+            response["item"] = item
+        return response
 
 
 # ============================================================================
@@ -1345,8 +1446,12 @@ def main():
     print(f"Database: {DB_PATH}")
     print(f"URL: http://localhost:{args.port}")
     print(f"\nLabels: {', '.join(CONFIG.labels)}")
-    print(f"Shortcuts: {' '.join(f'{i+1}={l}' for i, l in enumerate(CONFIG.labels[:9]))}")
-    print(f"           X/Space=refuse  Z=undo  Q=bad quality")
+    if is_confirmation_mode():
+        print("Shortcuts: 1=STRONG 2=LOOSE 3=NONE 4=INVALID")
+        print("           R=replay  Z=undo  H=history")
+    else:
+        print(f"Shortcuts: {' '.join(f'{i+1}={l}' for i, l in enumerate(CONFIG.labels[:9]))}")
+        print("           X/Space=refuse  Z=undo  Q=bad quality")
     print(f"{'='*50}\n")
     
     uvicorn.run(app, host=args.host, port=args.port)

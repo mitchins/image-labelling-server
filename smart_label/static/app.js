@@ -29,6 +29,10 @@ let STYLES = ['flat', 'grim', 'modern', 'moe', 'painterly', 'retro'];
 let STYLE_COLORS = {};
 let KEY_MAP = {};
 
+function isConfirmationMode() {
+    return CONFIG?.mode === 'ontology_confirmation';
+}
+
 function getTaskMediaType(item = currentItem) {
     return (item?.media_type || CONFIG?.media_type || 'image').toLowerCase();
 }
@@ -39,6 +43,12 @@ function getMediaUrl(item = currentItem) {
 
 function getItemName(item = currentItem) {
     return escapeHtml((item?.path || '').split(/[\\/]/).pop() || `${capitalize(getTaskMediaType(item))} item`);
+}
+
+function formatMetadataValue(value) {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
 }
 
 async function loadConfig() {
@@ -68,6 +78,12 @@ async function loadConfig() {
 function updateShortcutsDisplay(mediaType = getTaskMediaType()) {
     const shortcuts = document.getElementById('shortcuts');
     if (!shortcuts) return;
+
+    if (isConfirmationMode()) {
+        shortcuts.innerHTML = ['1 STRONG', '2 LOOSE', '3 NONE', '4 INVALID', 'R Replay', 'Z Undo', 'H History']
+            .map((label) => `<span class="shortcut-group"><kbd>${escapeHtml(label.split(' ')[0])}</kbd> ${escapeHtml(label.slice(2))}</span>`).join('');
+        return;
+    }
 
     const groups = STYLES.map((s, i) =>
         `<span class="shortcut-group"><kbd>${i + 1}</kbd> ${capitalize(s)}</span>`
@@ -199,6 +215,46 @@ async function label(style, qualityFlag = null) {
     }
 }
 
+async function confirmItem(confirmation, item = currentItem) {
+    if (!item || isLabeling || Date.now() - lastSubmitAt < 250) return;
+    isLabeling = true;
+    lastSubmitAt = Date.now();
+    setLabelingBusy(true);
+
+    try {
+        const res = await fetch('/api/label', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image_id: item.id, confirmation, session_id: sessionId })
+        });
+        const data = await res.json();
+        if (res.status === 409) {
+            showToast('Already confirmed elsewhere, loading next');
+            await loadNext();
+            return;
+        }
+        if (!data.success) {
+            showToast(data.message || 'Failed to save confirmation');
+            return;
+        }
+        updateProgress(data.progress);
+        renderReceipt(item, confirmation);
+        flashButton(`confirmation-${confirmation}`);
+        await loadNext();
+    } catch (err) {
+        console.error('Confirmation failed:', err);
+        showToast('Error saving confirmation');
+    } finally {
+        isLabeling = false;
+        setLabelingBusy(false);
+    }
+}
+
+function renderReceipt(item, confirmation) {
+    const receipt = document.getElementById('lastDecisionGlobal');
+    if (receipt) receipt.innerHTML = `Last decision: <strong>${escapeHtml(item.indicative_value)}</strong> &rarr; <strong>${escapeHtml(confirmation)}</strong>`;
+}
+
 async function loadReplacement(clusterId) {
     try {
         const res = await fetch(`/api/replacement/${clusterId}`);
@@ -229,6 +285,17 @@ async function undoLast() {
 
         if (data.success) {
             showToast('Undone');
+            if (isConfirmationMode()) {
+                const item = data.item || data.returned_item;
+                if (item && item.id !== undefined) {
+                    const receipt = document.getElementById('lastDecisionGlobal');
+                    if (receipt) receipt.innerHTML = `Undid decision for <strong>${escapeHtml(item.indicative_value)}</strong>`;
+                    currentItem = item;
+                    updateProgress(item.progress);
+                    renderItem(item);
+                    return;
+                }
+            }
             loadNext();
         } else {
             showToast(data.message || 'Nothing to undo');
@@ -247,6 +314,11 @@ function renderItem(data) {
     const main = document.getElementById('main');
     const mediaType = getTaskMediaType(data);
     updateShortcutsDisplay(mediaType);
+
+    if (isConfirmationMode()) {
+        renderConfirmationItem(data);
+        return;
+    }
 
     const seriesDisplay = data.series_name ? `<span class="series-name">${data.series_name}</span>` : '';
 
@@ -325,6 +397,37 @@ function renderItem(data) {
             ${qualityControls}
         </div>
     `;
+}
+
+function renderConfirmationItem(data) {
+    const main = document.getElementById('main');
+    const ontology = Array.isArray(CONFIG?.ontology) ? CONFIG.ontology : [];
+    const ontologyEntry = ontology.find((entry) => entry.id === data.indicative_value);
+    const displayName = ontologyEntry?.display_name || data.indicative_value;
+    const mediaType = getTaskMediaType(data);
+    const choices = [
+        ['STRONG', 'Strong match'], ['LOOSE', 'Loose match'], ['NONE', 'No match'], ['INVALID', 'Invalid item']
+    ];
+    const mediaHtml = mediaType === 'audio'
+        ? `<div class="audio-review">
+            <div class="audio-title">${getItemName(data)}</div>
+            <audio id="currentAudio" src="${getMediaUrl(data)}" controls preload="auto"></audio>
+            <button class="btn-secondary replay-btn" onclick="replayCurrentAudio()">Replay <kbd>R</kbd></button>
+          </div>`
+        : `<div class="image-container"><img src="${getMediaUrl(data)}" alt="Item to confirm"></div>`;
+    const metadata = (CONFIG?.metadata_fields || [])
+        .filter((field) => data[field] !== undefined && data[field] !== null && data[field] !== '')
+        .map((field) => `<div class="confirmation-meta-row"><dt>${escapeHtml(field.replaceAll('_', ' '))}</dt><dd>${escapeHtml(formatMetadataValue(data[field]))}</dd></div>`)
+        .join('');
+    const itemKind = mediaType === 'audio' ? 'clip' : 'item';
+    main.innerHTML = `
+        ${mediaHtml}
+        <div class="confirmation-card">
+            <div class="confirmation-question">Does this ${itemKind} express <strong>${escapeHtml(displayName)}</strong>?</div>
+            <div class="indicative-value">${escapeHtml(data.indicative_value)}</div>
+            ${metadata ? `<dl class="confirmation-meta">${metadata}</dl>` : ''}
+            <div class="confirmation-buttons">${choices.map(([value, label], index) => `<button class="btn confirmation-btn confirmation-${value.toLowerCase()}" id="btn-confirmation-${value}" data-label-action="true" onclick="confirmItem('${value}')">${escapeHtml(label)} <kbd>${index + 1}</kbd></button>`).join('')}</div>
+        </div>`;
 }
 
 function getDefaultColor(idx) {
@@ -415,7 +518,9 @@ async function showStats() {
         const res = await fetch('/api/stats');
         const stats = await res.json();
 
-        const allLabels = STYLES.concat(['REFUSE']);
+        const allLabels = isConfirmationMode()
+            ? ['STRONG', 'LOOSE', 'NONE', 'INVALID']
+            : STYLES.concat(['REFUSE']);
         const maxCount = Math.max(...allLabels.map((l) => stats.by_label?.[l] || 0), 1);
 
         content.innerHTML = `
@@ -481,8 +586,9 @@ async function showHistory() {
     const modal = document.getElementById('historyModal');
     const filter = document.getElementById('historyFilter');
 
-    filter.innerHTML = '<option value="">All Labels</option>' +
-        STYLES.concat(['REFUSE']).map((s) =>
+    const filterValues = isConfirmationMode() ? ['STRONG', 'LOOSE', 'NONE', 'INVALID'] : STYLES.concat(['REFUSE']);
+    filter.innerHTML = `<option value="">All ${isConfirmationMode() ? 'Outcomes' : 'Labels'}</option>` +
+        filterValues.map((s) =>
             `<option value="${s}">${capitalize(s)}</option>`
         ).join('');
 
@@ -534,6 +640,19 @@ async function loadHistory(page = 1) {
 }
 
 function renderHistoryItem(item) {
+    if (isConfirmationMode()) {
+        const indicative = item.indicative_value ?? item.indicative ?? '';
+        const outcome = item.confirmation ?? item.outcome ?? item.label ?? '';
+        const entry = (CONFIG?.ontology || []).find((value) => value.id === indicative);
+        const media = getTaskMediaType(item) === 'audio'
+            ? `<audio id="history-audio-${item.id}" controls preload="none" src="${getMediaUrl(item)}"></audio>`
+            : `<img src="${getMediaUrl(item)}" alt="Reviewed item" loading="lazy">`;
+        return `<div class="confirmation-history-item">
+            <div class="confirmation-history-media">${media}</div>
+            <div class="confirmation-history-summary"><strong>${escapeHtml(entry?.display_name || indicative)}</strong><span class="history-outcome">${escapeHtml(outcome)}</span></div>
+            <div class="confirmation-history-actions">${['STRONG', 'LOOSE', 'NONE', 'INVALID'].map((value) => `<button class="btn-secondary" onclick="confirmHistory(${Number(item.id)}, '${value}')">${value}</button>`).join('')}</div>
+        </div>`;
+    }
     const mediaType = getTaskMediaType(item);
     const labelColor = STYLE_COLORS[item.label] || '#c62828';
 
@@ -565,6 +684,28 @@ function renderHistoryItem(item) {
             </div>
         </div>
     `;
+}
+
+async function confirmHistory(imageId, confirmation) {
+    try {
+        const res = await fetch(`/api/history/${imageId}/relabel`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirmation, session_id: sessionId })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+            showToast(data.detail || 'Failed to change confirmation');
+            return;
+        }
+        const receipt = document.getElementById('lastDecisionGlobal');
+        if (receipt) receipt.innerHTML = `History correction &rarr; <strong>${escapeHtml(confirmation)}</strong>`;
+        showToast(`Changed to ${confirmation}`);
+        loadHistory(currentHistoryPage);
+    } catch (err) {
+        console.error('Confirmation correction failed:', err);
+        showToast('Failed to change confirmation');
+    }
 }
 
 async function relabelFromHistory(imageId) {
@@ -665,6 +806,11 @@ document.addEventListener('keydown', (e) => {
 
     const key = e.key.toLowerCase();
 
+    if (isConfirmationMode() && key === ' ') {
+        e.preventDefault();
+        return;
+    }
+
     if (key === 'z') {
         e.preventDefault();
         undoLast();
@@ -688,6 +834,14 @@ document.addEventListener('keydown', (e) => {
         replayCurrentAudio();
         return;
     }
+
+    if (isConfirmationMode() && ['1', '2', '3', '4'].includes(key)) {
+        e.preventDefault();
+        confirmItem(['STRONG', 'LOOSE', 'NONE', 'INVALID'][Number(key) - 1]);
+        return;
+    }
+
+    if (isConfirmationMode()) return;
 
     if (KEY_MAP[key]) {
         if (KEY_MAP[key] === 'BAD_QUALITY' && getTaskMediaType() !== 'image') return;
@@ -717,3 +871,5 @@ window.closeHistory = closeHistory;
 window.relabelFromHistory = relabelFromHistory;
 window.replayCurrentAudio = replayCurrentAudio;
 window.replayHistoryAudio = replayHistoryAudio;
+window.confirmItem = confirmItem;
+window.confirmHistory = confirmHistory;

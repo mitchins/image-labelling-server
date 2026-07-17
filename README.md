@@ -87,6 +87,42 @@ Notes:
 - Optional hint fields: `predicted_style`, `predicted_confidence`.
 - Optional cluster field: `cluster_id` (enables replacement on refuse).
 
+### 2b) Confirm candidates across an ontology
+
+Use one queue when every item already has an indicative ontology value and the
+reviewer should judge how strongly it matches.
+
+```json
+{"path":"/audio/001.wav","indicative_value":"DREAD","narration_text":"Something moved beyond the door."}
+```
+
+```yaml
+# ontology.yaml
+id: prosody-register
+version: v1
+ontology:
+  - {id: SUSPENSE, display_name: Suspense}
+  - {id: DREAD, display_name: Foreboding}
+  - {id: URGENCY, display_name: Urgency}
+  - {id: SOMBRE, display_name: Sombre}
+  - {id: WRY, display_name: Wry}
+  - {id: BRIGHT, display_name: Bright}
+```
+
+```bash
+python -m smart_label ingest-jsonl \
+  --jsonl candidates.jsonl \
+  --mode ontology-confirmation \
+  --ontology ontology.yaml \
+  --media-type audio \
+  --metadata-fields narration_text
+```
+
+Confirmation mode uses fixed outcomes: `1` strong, `2` loose, `3` no match,
+and `4` invalid item. Exports retain `ontology_id`, `ontology_version`,
+`indicative_value`, and `confirmation`; downstream code decides whether to map
+these to values such as `YES`, `KINDA`, and `NO`.
+
 ### 3) Already have a queue DB
 
 ```bash
@@ -134,6 +170,9 @@ python -m smart_label serve --config my_task.yaml
 | H | History |
 | Esc | Close modal |
 
+In ontology confirmation mode, `1–4` are always `STRONG`, `LOOSE`, `NONE`, and
+`INVALID`; `X` and Space are deliberately disabled.
+
 ## Database Schema
 
 ```sql
@@ -147,7 +186,11 @@ CREATE TABLE queue (
     human_label TEXT,              -- Set after labeling
     labeled_at TIMESTAMP,
     quality_flag TEXT,             -- 'BAD_QUALITY' if marked
-    session_id TEXT
+    session_id TEXT,
+    indicative_value TEXT,         -- Proposed ontology ID (confirmation mode)
+    confirmation TEXT,             -- STRONG/LOOSE/NONE/INVALID
+    confirmation_at TIMESTAMP,
+    confirmation_session_id TEXT
     -- plus any metadata columns you configured
 );
 
@@ -182,3 +225,7 @@ CREATE TABLE settings (
 python -m smart_label export --db /path/to/queue.db --output labels.json
 # Format: [{"path": "/path/to/img.jpg", "label": "modern"}, ...]
 ```
+
+Confirmation exports use a versioned envelope with `ontology` and `items`
+members. Each item retains its source metadata, indicative value, confirmation,
+timestamp, and review session; no `YES`/`KINDA`/`NO` conversion is applied.

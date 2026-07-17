@@ -13,10 +13,13 @@ import random
 import sqlite3
 from pathlib import Path
 from typing import Optional
+import yaml
 
-from config import LabelConfig
+from config import LabelConfig, encode_metadata_value, quote_identifier, validate_metadata_fields
 from ingest_folder import write_config
 from media_utils import guess_media_type_from_path, normalize_media_type
+
+OUTCOMES = ("STRONG", "LOOSE", "NONE", "INVALID")
 
 def parse_labels(label_arg: str) -> list:
     labels = [label.strip() for label in label_arg.split(",") if label.strip()]
@@ -26,15 +29,19 @@ def parse_labels(label_arg: str) -> list:
 def parse_metadata_fields(metadata_arg: str) -> list:
     if not metadata_arg:
         return []
-    return [field.strip() for field in metadata_arg.split(",") if field.strip()]
+    fields = [field.strip() for field in metadata_arg.split(",") if field.strip()]
+    try:
+        return validate_metadata_fields(fields)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
-def create_queue_db(db_path: Path, metadata_fields: list):
+def create_queue_db(db_path: Path, metadata_fields: list, mode: str = "classification"):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
     metadata_columns = ",\n            ".join(
-        f"{field} TEXT" for field in metadata_fields
+        f"{quote_identifier(field)} TEXT" for field in metadata_fields
     )
     if metadata_columns:
         metadata_columns = f",\n            {metadata_columns}"
@@ -48,7 +55,7 @@ def create_queue_db(db_path: Path, metadata_fields: list):
 
         CREATE TABLE queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            path TEXT UNIQUE,
+            path TEXT,
             media_type TEXT NOT NULL DEFAULT 'image',
             cluster_id INTEGER,
             predicted_style TEXT,
@@ -56,7 +63,11 @@ def create_queue_db(db_path: Path, metadata_fields: list):
             human_label TEXT,
             labeled_at TIMESTAMP,
             quality_flag TEXT,
-            session_id TEXT{metadata_columns}
+            session_id TEXT,
+            indicative_value TEXT,
+            confirmation TEXT,
+            confirmation_at TIMESTAMP,
+            confirmation_session_id TEXT{metadata_columns}
         );
 
         CREATE TABLE sessions (
@@ -79,6 +90,10 @@ def create_queue_db(db_path: Path, metadata_fields: list):
 
         CREATE INDEX idx_queue_unlabeled ON queue(human_label) WHERE human_label IS NULL;
         CREATE INDEX idx_queue_cluster ON queue(cluster_id);
+        CREATE UNIQUE INDEX idx_queue_classification_path
+            ON queue(path) WHERE indicative_value IS NULL;
+        CREATE UNIQUE INDEX idx_queue_confirmation_candidate
+            ON queue(path, indicative_value) WHERE indicative_value IS NOT NULL;
         """
     )
 
@@ -96,6 +111,10 @@ def write_labels_and_settings(
     hint_field: str,
     hint_confidence_field: str,
     cluster_field: str,
+    mode: str = "classification",
+    ontology_id: Optional[str] = None,
+    ontology_version: Optional[str] = None,
+    ontology: Optional[list] = None,
 ):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
@@ -113,6 +132,10 @@ def write_labels_and_settings(
         "hint_confidence_field": hint_confidence_field,
         "cluster_field": cluster_field,
         "metadata_fields": metadata_fields,
+        "mode": mode,
+        "ontology_id": ontology_id,
+        "ontology_version": ontology_version,
+        "ontology": ontology or [],
     }
 
     cur.executemany(
@@ -134,6 +157,9 @@ def load_jsonl(
     base_dir: Path,
     absolute_paths: bool,
     media_type: Optional[str],
+    indicative_field: str = "indicative_value",
+    mode: str = "classification",
+    ontology_ids: Optional[set] = None,
 ):
     items = []
     with jsonl_path.open("r", encoding="utf-8") as f:
@@ -153,6 +179,13 @@ def load_jsonl(
             if not isinstance(raw_path, str) or not raw_path:
                 raise SystemExit(f"Invalid '{path_field}' on line {line_num}")
 
+            indicative_value = record.get(indicative_field)
+            if mode == "ontology_confirmation":
+                if indicative_value is None or indicative_value == "":
+                    raise SystemExit(f"Missing '{indicative_field}' on line {line_num}")
+                if indicative_value not in ontology_ids:
+                    raise SystemExit(f"Unknown '{indicative_field}' value {indicative_value!r} on line {line_num}")
+
             path = Path(raw_path)
             if base_dir and not path.is_absolute():
                 path = base_dir / path
@@ -166,6 +199,7 @@ def load_jsonl(
                     "cluster_id": record.get(cluster_field),
                     "predicted_style": record.get(hint_field),
                     "predicted_confidence": record.get(hint_confidence_field),
+                    "indicative_value": indicative_value,
                     "metadata": {field: record.get(field) for field in metadata_fields},
                 }
             )
@@ -187,11 +221,15 @@ def insert_items(db_path: Path, items: list, metadata_fields: list):
         "labeled_at",
         "quality_flag",
         "session_id",
+        "indicative_value",
+        "confirmation",
+        "confirmation_at",
+        "confirmation_session_id",
     ]
     all_columns = base_columns + metadata_fields
 
     placeholders = ", ".join("?" for _ in all_columns)
-    column_clause = ", ".join(all_columns)
+    column_clause = ", ".join(quote_identifier(column) for column in all_columns)
 
     values = []
     for item in items:
@@ -205,9 +243,14 @@ def insert_items(db_path: Path, items: list, metadata_fields: list):
             None,
             None,
             None,
+            item.get("indicative_value"),
+            None,
+            None,
+            None,
         ]
         for field in metadata_fields:
-            row.append(item["metadata"].get(field))
+            value = item["metadata"].get(field)
+            row.append(encode_metadata_value(value))
         values.append(tuple(row))
 
     cur.executemany(
@@ -225,9 +268,13 @@ def insert_items(db_path: Path, items: list, metadata_fields: list):
 def main():
     parser = argparse.ArgumentParser(description="Create a labeling queue from a JSONL file")
     parser.add_argument("--jsonl", required=True, help="Path to JSONL file")
+    parser.add_argument("--mode", choices=["classification", "ontology-confirmation"], default="classification")
+    parser.add_argument("--ontology", help="JSON/YAML ontology definition")
+    parser.add_argument("--indicative-field", default="indicative_value")
     parser.add_argument(
         "--labels",
-        required=True,
+        required=False,
+        default="",
         help="Comma-separated list of class names, e.g. cat,dog,other",
     )
     parser.add_argument("--db", default="labeling_queue.db", help="Output SQLite database path")
@@ -292,9 +339,41 @@ def main():
 
     labels = parse_labels(args.labels)
     if not labels:
-        raise SystemExit("No labels provided. Example: --labels cat,dog,other")
+        if args.mode == "classification":
+            raise SystemExit("No labels provided. Example: --labels cat,dog,other")
+        labels = list(OUTCOMES)
 
     metadata_fields = parse_metadata_fields(args.metadata_fields)
+    ontology_id = ontology_version = None
+    ontology = []
+    ontology_ids = None
+    if args.mode == "ontology-confirmation":
+        if not args.ontology:
+            raise SystemExit("--ontology is required for ontology-confirmation mode")
+        ontology_path = Path(args.ontology)
+        if not ontology_path.exists():
+            raise SystemExit(f"Ontology file not found: {ontology_path}")
+        with ontology_path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) if ontology_path.suffix in (".yaml", ".yml") else json.load(f)
+        if not isinstance(data, dict):
+            raise SystemExit("Ontology must include id, version, and an ontology/values list")
+        ontology_id = data.get("id") or data.get("ontology_id")
+        ontology_version = data.get("version") or data.get("ontology_version")
+        ontology = data.get("ontology", data.get("values", []))
+        if not ontology_id or not ontology_version:
+            raise SystemExit("Ontology must include stable id and version values")
+        if not isinstance(ontology, list) or not all(
+            isinstance(x, dict)
+            and isinstance(x.get("id"), str)
+            and x["id"].strip()
+            and isinstance(x.get("display_name"), str)
+            and x["display_name"].strip()
+            for x in ontology
+        ):
+            raise SystemExit("Ontology must be a list of objects with id and display_name")
+        ontology_ids = {x["id"] for x in ontology}
+        if len(ontology_ids) != len(ontology):
+            raise SystemExit("Ontology ids must be unique")
     base_dir = Path(args.base_dir).resolve() if args.base_dir else None
 
     items = load_jsonl(
@@ -307,6 +386,9 @@ def main():
         base_dir=base_dir,
         absolute_paths=args.absolute_paths,
         media_type=args.media_type,
+        indicative_field=args.indicative_field,
+        mode="ontology_confirmation" if args.mode == "ontology-confirmation" else args.mode,
+        ontology_ids=ontology_ids,
     )
 
     if not items:
@@ -320,7 +402,7 @@ def main():
 
     db_path = Path(args.db)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    create_queue_db(db_path, metadata_fields)
+    create_queue_db(db_path, metadata_fields, args.mode)
     write_labels_and_settings(
         db_path,
         labels,
@@ -331,6 +413,10 @@ def main():
         args.hint_field,
         args.hint_confidence_field,
         args.cluster_field,
+        "ontology_confirmation" if args.mode == "ontology-confirmation" else args.mode,
+        ontology_id,
+        ontology_version,
+        ontology,
     )
     insert_items(db_path, items, metadata_fields)
 
@@ -340,6 +426,10 @@ def main():
         LabelConfig(
             name=args.name,
             description=args.description,
+            mode="ontology_confirmation" if args.mode == "ontology-confirmation" else args.mode,
+            ontology_id=ontology_id,
+            ontology_version=ontology_version,
+            ontology=ontology,
             labels=labels,
             db_path=str(db_path),
             media_type=normalize_media_type(args.media_type),

@@ -5,7 +5,12 @@ import tempfile
 import json
 import yaml
 from pathlib import Path
-from config import LabelConfig, ANIME_STYLE_CONFIG
+from config import (
+    ANIME_STYLE_CONFIG,
+    LabelConfig,
+    decode_metadata_value,
+    encode_metadata_value,
+)
 
 
 class TestLabelConfig:
@@ -35,6 +40,30 @@ class TestLabelConfig:
         assert config.label_colors["cat"] == "#FF0000"
         assert config.db_path == "test.db"
         assert config.media_type == "audio"
+
+    def test_confirmation_config_contract(self):
+        config = LabelConfig(
+            mode="ontology_confirmation",
+            ontology_id="prosody-register",
+            ontology_version="v1",
+            ontology=[{"id": "DREAD", "display_name": "Foreboding"}],
+            labels=["STRONG", "LOOSE", "NONE", "INVALID"],
+        )
+        assert config.to_dict()["ontology"][0]["id"] == "DREAD"
+
+    def test_confirmation_config_requires_versioned_ontology(self):
+        with pytest.raises(ValueError):
+            LabelConfig(mode="ontology_confirmation")
+
+    @pytest.mark.parametrize("legacy", ["123", "true", "null", "[1,2]"])
+    def test_legacy_metadata_that_looks_like_json_stays_text(self, legacy):
+        assert decode_metadata_value(legacy) == legacy
+
+    @pytest.mark.parametrize("value", [123, True, [1, 2], {"a": 1}, "text"])
+    def test_marked_metadata_round_trips_type(self, value):
+        decoded = decode_metadata_value(encode_metadata_value(value))
+        assert decoded == value
+        assert type(decoded) is type(value)
     
     def test_from_json(self):
         """Test loading config from JSON file."""
