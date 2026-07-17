@@ -5,6 +5,7 @@ CLI entry point for smart_label package.
 Usage:
     python -m smart_label prepare --source ... --output ...
     python -m smart_label ingest-folder --images ... --labels ...
+    python -m smart_label ingest-audio --audio ... --labels ...
     python -m smart_label ingest-jsonl --jsonl ... --labels ...
     python -m smart_label serve --db ...
     python -m smart_label export --db ... --output ...
@@ -22,6 +23,7 @@ def main():
 Commands:
   prepare   Generate diverse sample queue using embedding clustering
   ingest-folder  Create queue from a folder of images
+  ingest-audio   Create queue from a folder of audio clips
   ingest-jsonl   Create queue from a JSONL file
   serve     Start the labeling web server
   export    Export labeled data to JSON
@@ -32,6 +34,11 @@ Examples:
   python -m smart_label ingest-folder \\
       --images /path/to/images \\
       --labels cat,dog,other
+
+  # Fast-start from a folder of short audio clips
+  python -m smart_label ingest-audio \\
+      --audio /path/to/clips \\
+      --labels positive,negative,neutral
 
   # Prepare queue with 80 clusters, 1024 samples
   python -m smart_label prepare \\
@@ -90,8 +97,9 @@ Examples:
     ingest_jsonl.add_argument('--labels', required=True, help='Comma-separated list of class names')
     ingest_jsonl.add_argument('--db', default='labeling_queue.db', help='Output database')
     ingest_jsonl.add_argument('--config', default='labeling_task.json', help='Output config JSON file')
-    ingest_jsonl.add_argument('--name', default='Image Labeling Task', help='Task name shown in UI')
+    ingest_jsonl.add_argument('--name', default='Media Labeling Task', help='Task name shown in UI')
     ingest_jsonl.add_argument('--description', default='', help='Optional task description')
+    ingest_jsonl.add_argument('--media-type', default='image', choices=['image', 'audio'])
     ingest_jsonl.add_argument('--metadata-fields', default='', help='Comma-separated metadata fields')
     ingest_jsonl.add_argument('--path-field', default='path', help='JSONL field name for image path')
     ingest_jsonl.add_argument('--cluster-field', default='cluster_id', help='JSONL field name for cluster id')
@@ -102,6 +110,20 @@ Examples:
     ingest_jsonl.add_argument('--absolute-paths', action=argparse.BooleanOptionalAction, default=True)
     ingest_jsonl.add_argument('--limit', type=int)
     ingest_jsonl.add_argument('--shuffle', action=argparse.BooleanOptionalAction, default=True)
+
+    # Ingest-audio command
+    ingest_audio = subparsers.add_parser('ingest-audio', help='Create queue from a folder of audio clips')
+    ingest_audio.add_argument('--audio', required=True, help='Folder containing audio clips')
+    ingest_audio.add_argument('--labels', required=True, help='Comma-separated list of class names')
+    ingest_audio.add_argument('--db', default='labeling_queue.db', help='Output database')
+    ingest_audio.add_argument('--config', default='labeling_task.json', help='Output config JSON file')
+    ingest_audio.add_argument('--name', default='Audio Labeling Task', help='Task name shown in UI')
+    ingest_audio.add_argument('--description', default='', help='Optional task description')
+    ingest_audio.add_argument('--recursive', action=argparse.BooleanOptionalAction, default=True)
+    ingest_audio.add_argument('--extensions', default='aac,flac,m4a,mp3,ogg,opus,wav,webm')
+    ingest_audio.add_argument('--limit', type=int)
+    ingest_audio.add_argument('--shuffle', action=argparse.BooleanOptionalAction, default=True)
+    ingest_audio.add_argument('--absolute-paths', action=argparse.BooleanOptionalAction, default=True)
     
     # Serve command
     serve = subparsers.add_parser('serve', help='Start labeling server')
@@ -156,6 +178,7 @@ Examples:
             f'--config={args.config}',
             f'--name={args.name}',
             f'--description={args.description}',
+            f'--media-type={args.media_type}',
             f'--metadata-fields={args.metadata_fields}',
             f'--path-field={args.path_field}',
             f'--cluster-field={args.cluster_field}',
@@ -169,6 +192,25 @@ Examples:
         sys.argv.append('--shuffle' if args.shuffle else '--no-shuffle')
         sys.argv.append('--absolute-paths' if args.absolute_paths else '--no-absolute-paths')
         ingest_jsonl_main()
+
+    elif args.command == 'ingest-audio':
+        from ingest_audio import main as ingest_audio_main
+        sys.argv = [
+            'ingest-audio',
+            f'--audio={args.audio}',
+            f'--labels={args.labels}',
+            f'--db={args.db}',
+            f'--config={args.config}',
+            f'--name={args.name}',
+            f'--description={args.description}',
+            f'--extensions={args.extensions}',
+        ]
+        if args.limit is not None:
+            sys.argv.append(f'--limit={args.limit}')
+        sys.argv.append('--recursive' if args.recursive else '--no-recursive')
+        sys.argv.append('--shuffle' if args.shuffle else '--no-shuffle')
+        sys.argv.append('--absolute-paths' if args.absolute_paths else '--no-absolute-paths')
+        ingest_audio_main()
 
     elif args.command == 'serve':
         from smart_label.server import main as serve_main

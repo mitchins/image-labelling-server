@@ -5,7 +5,7 @@ import tempfile
 import json
 import yaml
 from pathlib import Path
-from smart_label.config import LabelConfig, ANIME_STYLE_CONFIG
+from config import LabelConfig, ANIME_STYLE_CONFIG
 
 
 class TestLabelConfig:
@@ -17,6 +17,7 @@ class TestLabelConfig:
         assert config.name == "Labeling Task"
         assert len(config.labels) == 3
         assert config.db_path == "queue.db"
+        assert config.media_type == "image"
         assert config.host == "0.0.0.0"
         assert config.port == 8765
     
@@ -26,12 +27,14 @@ class TestLabelConfig:
             name="Test Task",
             labels=["cat", "dog", "bird"],
             label_colors={"cat": "#FF0000", "dog": "#00FF00"},
-            db_path="test.db"
+            db_path="test.db",
+            media_type="audio",
         )
         assert config.name == "Test Task"
         assert config.labels == ["cat", "dog", "bird"]
         assert config.label_colors["cat"] == "#FF0000"
         assert config.db_path == "test.db"
+        assert config.media_type == "audio"
     
     def test_from_json(self):
         """Test loading config from JSON file."""
@@ -85,6 +88,7 @@ class TestLabelConfig:
         
         assert d["name"] == "Dict Test"
         assert d["labels"] == ["a", "b"]
+        assert d["media_type"] == "image"
         assert d["metadata_fields"] == ["field1", "field2"]
         assert "db_path" not in d  # Internal config not exposed
     

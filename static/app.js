@@ -8,7 +8,6 @@ function generateUUID() {
     if (crypto && crypto.randomUUID) {
         return crypto.randomUUID();
     }
-    // Fallback UUID v4 generator
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
         const r = Math.random() * 16 | 0;
         const v = c === 'x' ? r : (r & 0x3 | 0x8);
@@ -17,9 +16,10 @@ function generateUUID() {
 }
 
 // State
-let currentImage = null;
+let currentItem = null;
 let preloadedImages = [];
 let isLabeling = false;
+let lastSubmitAt = 0;
 let sessionId = localStorage.getItem('smartLabelSession') || generateUUID();
 localStorage.setItem('smartLabelSession', sessionId);
 
@@ -29,43 +29,54 @@ let STYLES = ['flat', 'grim', 'modern', 'moe', 'painterly', 'retro'];
 let STYLE_COLORS = {};
 let KEY_MAP = {};
 
+function getTaskMediaType(item = currentItem) {
+    return (item?.media_type || CONFIG?.media_type || 'image').toLowerCase();
+}
+
+function getMediaUrl(item = currentItem) {
+    return `/api/media/${item.id}`;
+}
+
+function getItemName(item = currentItem) {
+    return escapeHtml((item?.path || '').split(/[\\/]/).pop() || `${capitalize(getTaskMediaType(item))} item`);
+}
+
 async function loadConfig() {
     try {
         const res = await fetch('/api/config');
         CONFIG = await res.json();
-        
+
         STYLES = CONFIG.labels || STYLES;
         STYLE_COLORS = CONFIG.label_colors || {};
-        
-        // Build key map: 1-9 for labels, x/space for refuse, q for bad quality
+
         KEY_MAP = {};
         STYLES.forEach((s, i) => {
             if (i < 9) KEY_MAP[String(i + 1)] = s;
         });
-        KEY_MAP['x'] = 'REFUSE';
+        KEY_MAP.x = 'REFUSE';
         KEY_MAP[' '] = 'REFUSE';
-        KEY_MAP['q'] = 'BAD_QUALITY';
-        
-        // Update UI with config
+        KEY_MAP.q = 'BAD_QUALITY';
+        KEY_MAP.r = 'REPLAY';
+
         document.getElementById('taskName').textContent = CONFIG.name || 'Labeling Task';
         updateShortcutsDisplay();
-        
     } catch (err) {
         console.warn('Failed to load config, using defaults:', err);
     }
 }
 
-function updateShortcutsDisplay() {
+function updateShortcutsDisplay(mediaType = getTaskMediaType()) {
     const shortcuts = document.getElementById('shortcuts');
     if (!shortcuts) return;
-    
-    const groups = STYLES.map((s, i) => 
+
+    const groups = STYLES.map((s, i) =>
         `<span class="shortcut-group"><kbd>${i + 1}</kbd> ${capitalize(s)}</span>`
     ).join('');
-    
-    shortcuts.innerHTML = groups + 
+
+    shortcuts.innerHTML = groups +
         ' <span class="shortcut-group"><kbd>X</kbd> Refuse</span>' +
-        ' <span class="shortcut-group"><kbd>Q</kbd> Bad Quality</span>' +
+        (mediaType === 'image' ? ' <span class="shortcut-group"><kbd>Q</kbd> Bad Quality</span>' : '') +
+        (mediaType === 'audio' ? ' <span class="shortcut-group"><kbd>R</kbd> Replay</span>' : '') +
         ' <span class="shortcut-group"><kbd>Z</kbd> Undo</span>' +
         ' <span class="shortcut-group"><kbd>H</kbd> History</span>';
 }
@@ -78,20 +89,22 @@ async function loadNext() {
     try {
         const res = await fetch(`/api/next?session_id=${sessionId}`);
         const data = await res.json();
-        
+
         if (data.done) {
             showDone(data.progress?.total || 0);
             return;
         }
-        
-        currentImage = data;
+
+        currentItem = data;
         updateProgress(data.progress);
-        renderImage(data);
-        loadGarbageRating(data.id);
+        renderItem(data);
+        if (getTaskMediaType(data) === 'image') {
+            loadGarbageRating(data.id);
+        }
         preloadNext();
     } catch (err) {
-        console.error('Failed to load next image:', err);
-        showError('Failed to load image. Check server connection.');
+        console.error('Failed to load next item:', err);
+        showError('Failed to load item. Check server connection.');
     }
 }
 
@@ -99,7 +112,7 @@ async function loadGarbageRating(imageId) {
     try {
         const res = await fetch(`/api/garbage-rating/${imageId}`);
         const data = await res.json();
-        
+
         const ratingEl = document.getElementById('garbage-rating');
         if (ratingEl && data.garbage_score !== undefined) {
             const score = data.garbage_score;
@@ -116,12 +129,11 @@ async function preloadNext() {
     try {
         const res = await fetch('/api/batch?count=5');
         const data = await res.json();
-        preloadedImages = data.images || [];
-        
-        // Preload images into browser cache
-        preloadedImages.forEach(img => {
+        preloadedImages = (data.images || []).filter((item) => getTaskMediaType(item) === 'image');
+
+        preloadedImages.forEach((img) => {
             const preload = new Image();
-            preload.src = `/api/image/${img.id}`;
+            preload.src = getMediaUrl(img);
         });
     } catch (err) {
         console.warn('Preload failed:', err);
@@ -129,47 +141,50 @@ async function preloadNext() {
 }
 
 async function label(style, qualityFlag = null) {
-    if (!currentImage || isLabeling) return;
-    
+    if (!currentItem || isLabeling || Date.now() - lastSubmitAt < 250) return;
+    if (qualityFlag === 'BAD_QUALITY' && getTaskMediaType() !== 'image') return;
+
     isLabeling = true;
-    
+    lastSubmitAt = Date.now();
+    setLabelingBusy(true);
+
     try {
-        // Handle BAD_QUALITY case - it's actually a REFUSE with a flag
         if (style === 'BAD_QUALITY') {
             style = 'REFUSE';
             qualityFlag = 'BAD_QUALITY';
         }
-        
+
         const payload = {
-            image_id: currentImage.id,
+            image_id: currentItem.id,
             label: style,
             session_id: sessionId
         };
-        
-        // Add quality_flag if present
+
         if (qualityFlag) {
             payload.quality_flag = qualityFlag;
         }
-        
+
         const res = await fetch('/api/label', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
-        
+
         const data = await res.json();
-        
+
+        if (res.status === 409) {
+            showToast('Already labeled elsewhere, loading next');
+            loadNext();
+            return;
+        }
+
         if (data.success) {
             updateProgress(data.progress);
-            
-            // Quick visual feedback
             flashButton(style);
-            
-            // Both REFUSE and BAD_QUALITY get replacement from same cluster
+
             if (style === 'REFUSE') {
-                loadReplacement(currentImage.cluster_id);
+                loadReplacement(currentItem.cluster_id);
             } else {
-                // Load next immediately for normal labels
                 loadNext();
             }
         } else {
@@ -180,6 +195,7 @@ async function label(style, qualityFlag = null) {
         showToast('Error saving label');
     } finally {
         isLabeling = false;
+        setLabelingBusy(false);
     }
 }
 
@@ -187,29 +203,30 @@ async function loadReplacement(clusterId) {
     try {
         const res = await fetch(`/api/replacement/${clusterId}`);
         const data = await res.json();
-        
+
         if (data.done) {
             showDone(data.total || 993);
             return;
         }
-        
-        currentImage = data;
+
+        currentItem = data;
         updateProgress(data.progress);
-        renderImage(data);
-        loadGarbageRating(data.id);
+        renderItem(data);
+        if (getTaskMediaType(data) === 'image') {
+            loadGarbageRating(data.id);
+        }
         preloadNext();
     } catch (err) {
         console.error('Failed to load replacement:', err);
-        // Fallback to random next image
         loadNext();
     }
 }
 
 async function undoLast() {
     try {
-        const res = await fetch('/api/undo', { method: 'POST' });
+        const res = await fetch(`/api/undo?session_id=${encodeURIComponent(sessionId)}`, { method: 'POST' });
         const data = await res.json();
-        
+
         if (data.success) {
             showToast('Undone');
             loadNext();
@@ -226,19 +243,22 @@ async function undoLast() {
 // Rendering
 // ============================================================================
 
-function renderImage(data) {
+function renderItem(data) {
     const main = document.getElementById('main');
-    
+    const mediaType = getTaskMediaType(data);
+    updateShortcutsDisplay(mediaType);
+
     const seriesDisplay = data.series_name ? `<span class="series-name">${data.series_name}</span>` : '';
-    
+
     const metaInfo = [];
     if (data.production_year) metaInfo.push(`📅 ${data.production_year}`);
     if (data.demographic) metaInfo.push(`👥 ${capitalize(data.demographic)}`);
     const metaDisplay = metaInfo.length > 0 ? `<span class="meta-tags">${metaInfo.join(' | ')}</span>` : '';
-    
-    const clusterInfo = data.cluster_id !== undefined ? `<span class="cluster-info">Cluster ${data.cluster_id}</span>` : '';
-    
-    // Build prediction display if available
+
+    const clusterInfo = data.cluster_id !== undefined && data.cluster_id !== null
+        ? `<span class="cluster-info">Cluster ${data.cluster_id}</span>`
+        : '';
+
     let predictionHtml = '';
     if (data.predicted_style) {
         predictionHtml = `
@@ -246,57 +266,78 @@ function renderImage(data) {
                 🔍 Reveal prediction
             </button>
             <div id="predictionSpoiler" class="prediction-spoiler hidden">
-                Model predicted: <strong>${data.predicted_style}</strong> 
+                Model predicted: <strong>${data.predicted_style}</strong>
                 (${Math.round((data.predicted_confidence || 0) * 100)}%)
             </div>
         `;
     }
-    
-    // Build buttons dynamically from config
+
     const styleButtons = STYLES.map((s, i) => {
         const color = STYLE_COLORS[s] || getDefaultColor(i);
         return `
-            <button class="btn" style="background:${color};color:white" onclick="label('${s}')" id="btn-${s}">
+            <button class="btn" style="background:${color};color:white" onclick="label('${s}')" id="btn-${s}" data-label-action="true">
                 ${capitalize(s)} <kbd>${i + 1}</kbd>
             </button>
         `;
     }).join('');
-    
+
+    const mediaHtml = mediaType === 'audio'
+        ? `
+            <div class="audio-review" aria-label="Audio review card">
+                <div class="audio-title">🎧 ${getItemName(data)}</div>
+                <audio id="currentAudio" src="${getMediaUrl(data)}" controls preload="auto"></audio>
+                <button class="btn-secondary replay-btn" onclick="replayCurrentAudio()">Replay <kbd>R</kbd></button>
+            </div>
+        `
+        : `
+            <div class="image-container">
+                <img src="${getMediaUrl(data)}" alt="Frame to label"
+                     onload="this.style.opacity=1" style="opacity:0;transition:opacity 0.2s">
+            </div>
+        `;
+
+    const qualityControls = mediaType === 'image'
+        ? `
+            <button class="btn btn-bad-quality" onclick="label('REFUSE', 'BAD_QUALITY')" id="btn-BAD_QUALITY" data-label-action="true">
+                Bad Quality <kbd>Q</kbd>
+            </button>
+        `
+        : '';
+
+    const qualityMeta = mediaType === 'image'
+        ? '<span id="garbage-rating" class="garbage-rating">⏳ Analyzing quality...</span>'
+        : '<span class="garbage-rating">Audio review</span>';
+
     main.innerHTML = `
-        <div class="image-container">
-            <img src="/api/image/${data.id}" alt="Frame to label" 
-                 onload="this.style.opacity=1" style="opacity:0;transition:opacity 0.2s">
-        </div>
+        ${mediaHtml}
         <div class="meta">
             ${seriesDisplay}
             ${metaDisplay}
             ${clusterInfo}
-            <span id="garbage-rating" class="garbage-rating">⏳ Analyzing quality...</span>
+            ${qualityMeta}
             ${predictionHtml}
         </div>
         <div class="buttons">
             ${styleButtons}
-            <button class="btn btn-refuse" onclick="label('REFUSE')" id="btn-REFUSE">
+            <button class="btn btn-refuse" onclick="label('REFUSE')" id="btn-REFUSE" data-label-action="true">
                 Ambiguous <kbd>X</kbd>
             </button>
-            <button class="btn btn-bad-quality" onclick="label('REFUSE', 'BAD_QUALITY')" id="btn-BAD_QUALITY">
-                Bad Quality <kbd>Q</kbd>
-            </button>
+            ${qualityControls}
         </div>
     `;
 }
 
 function getDefaultColor(idx) {
-    const colors = ["#607D8B", "#37474F", "#1976D2", "#C2185B", "#7B1FA2", "#F57C00", "#00897B", "#5D4037"];
+    const colors = ['#607D8B', '#37474F', '#1976D2', '#C2185B', '#7B1FA2', '#F57C00', '#00897B', '#5D4037'];
     return colors[idx % colors.length];
 }
 
 function updateProgress(progress) {
     if (!progress) return;
-    
+
     const fill = document.getElementById('progressFill');
     const text = document.getElementById('progressText');
-    
+
     if (fill) fill.style.width = `${progress.percent}%`;
     if (text) text.textContent = `${progress.labeled} / ${progress.total} (${progress.percent}%)`;
 }
@@ -306,7 +347,7 @@ function showDone(total) {
     main.innerHTML = `
         <div class="done">
             <h2>🎉 All Done!</h2>
-            <p>You've labeled all ${total} images.</p>
+            <p>You've labeled all ${total} items.</p>
             <p style="margin-top: 20px;">
                 <a href="/api/export" download="labels.json">📥 Download Labels (JSON)</a>
             </p>
@@ -340,6 +381,13 @@ function flashButton(style) {
     }
 }
 
+function setLabelingBusy(isBusy) {
+    document.querySelectorAll('[data-label-action="true"]').forEach((button) => {
+        button.disabled = isBusy;
+        button.classList.toggle('is-busy', isBusy);
+    });
+}
+
 function togglePrediction() {
     const spoiler = document.getElementById('predictionSpoiler');
     const btn = document.querySelector('.btn-reveal');
@@ -359,17 +407,17 @@ function togglePrediction() {
 async function showStats() {
     const modal = document.getElementById('statsModal');
     const content = document.getElementById('statsContent');
-    
+
     modal.classList.add('active');
     content.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
-    
+
     try {
         const res = await fetch('/api/stats');
         const stats = await res.json();
-        
+
         const allLabels = STYLES.concat(['REFUSE']);
-        const maxCount = Math.max(...allLabels.map(l => stats.by_label?.[l] || 0), 1);
-        
+        const maxCount = Math.max(...allLabels.map((l) => stats.by_label?.[l] || 0), 1);
+
         content.innerHTML = `
             <div class="stats-grid">
                 <div class="stat-item">
@@ -389,10 +437,10 @@ async function showStats() {
                     <div class="stat-value">${Math.round(100 * stats.labeled / stats.total)}%</div>
                 </div>
             </div>
-            
+
             <h3>Labels Distribution</h3>
             <div class="label-bars">
-                ${allLabels.map(s => {
+                ${allLabels.map((s) => {
                     const count = stats.by_label?.[s] || 0;
                     const pct = 100 * count / maxCount;
                     const color = STYLE_COLORS[s] || (s === 'REFUSE' ? '#c62828' : '#757575');
@@ -409,7 +457,7 @@ async function showStats() {
             </div>
         `;
     } catch (err) {
-        content.innerHTML = `<p>Failed to load statistics</p>`;
+        content.innerHTML = '<p>Failed to load statistics</p>';
     }
 }
 
@@ -432,13 +480,12 @@ let currentHistoryPage = 1;
 async function showHistory() {
     const modal = document.getElementById('historyModal');
     const filter = document.getElementById('historyFilter');
-    
-    // Populate filter options from config
-    filter.innerHTML = '<option value="">All Labels</option>' + 
-        STYLES.concat(['REFUSE']).map(s => 
+
+    filter.innerHTML = '<option value="">All Labels</option>' +
+        STYLES.concat(['REFUSE']).map((s) =>
             `<option value="${s}">${capitalize(s)}</option>`
         ).join('');
-    
+
     modal.classList.add('active');
     loadHistory(1);
 }
@@ -447,37 +494,30 @@ async function loadHistory(page = 1) {
     currentHistoryPage = page;
     const content = document.getElementById('historyContent');
     const filter = document.getElementById('historyFilter').value;
-    
+
     content.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
-    
+
     try {
         const url = `/api/history?page=${page}&per_page=12${filter ? `&label_filter=${filter}` : ''}`;
         const res = await fetch(url);
         const data = await res.json();
-        
+
         if (!data.items || data.items.length === 0) {
             content.innerHTML = '<p class="history-empty">No labeled items yet</p>';
             document.getElementById('historyPagination').innerHTML = '';
             return;
         }
-        
+
+        const hasAudio = data.items.some((item) => getTaskMediaType(item) === 'audio');
         content.innerHTML = `
-            <div class="history-grid">
-                ${data.items.map(item => `
-                    <div class="history-item" onclick="relabelFromHistory('${item.id}')">
-                        <img src="/api/image/${item.id}" alt="Labeled frame" loading="lazy">
-                        <div class="history-label" style="background:${STYLE_COLORS[item.label] || '#c62828'}">
-                            ${capitalize(item.label)}
-                        </div>
-                    </div>
-                `).join('')}
+            <div class="history-grid ${hasAudio ? 'history-grid-audio' : ''}">
+                ${data.items.map((item) => renderHistoryItem(item)).join('')}
             </div>
         `;
-        
-        // Pagination
+
         const pagination = document.getElementById('historyPagination');
         const totalPages = Math.ceil(data.total / data.per_page);
-        
+
         if (totalPages > 1) {
             pagination.innerHTML = `
                 <button class="btn-secondary" ${page <= 1 ? 'disabled' : ''} onclick="loadHistory(${page - 1})">← Prev</button>
@@ -487,34 +527,67 @@ async function loadHistory(page = 1) {
         } else {
             pagination.innerHTML = '';
         }
-        
     } catch (err) {
         console.error('Failed to load history:', err);
         content.innerHTML = '<p>Failed to load history</p>';
     }
 }
 
+function renderHistoryItem(item) {
+    const mediaType = getTaskMediaType(item);
+    const labelColor = STYLE_COLORS[item.label] || '#c62828';
+
+    if (mediaType === 'audio') {
+        return `
+            <div class="history-audio-item">
+                <div class="history-audio-main">
+                    <div class="history-audio-head">
+                        <div class="history-audio-name">${getItemName(item)}</div>
+                        <div class="history-label history-label-inline" style="background:${labelColor}">
+                            ${capitalize(item.label)}
+                        </div>
+                    </div>
+                    <audio id="history-audio-${item.id}" controls preload="none" src="${getMediaUrl(item)}" onclick="event.stopPropagation()"></audio>
+                    <div class="history-audio-actions">
+                        <button class="btn-secondary" onclick="event.stopPropagation(); replayHistoryAudio('${item.id}')">Replay</button>
+                        <button class="btn-secondary" onclick="event.stopPropagation(); relabelFromHistory('${item.id}')">Relabel</button>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    return `
+        <div class="history-item" onclick="relabelFromHistory('${item.id}')">
+            <img src="${getMediaUrl(item)}" alt="Labeled frame" loading="lazy">
+            <div class="history-label" style="background:${labelColor}">
+                ${capitalize(item.label)}
+            </div>
+        </div>
+    `;
+}
+
 async function relabelFromHistory(imageId) {
-    const newLabel = prompt(`Enter new label for this image.\nValid: ${STYLES.join(', ')}, REFUSE`);
-    
+    const newLabel = prompt(`Enter new label for this item.\nValid: ${STYLES.join(', ')}, REFUSE`);
+
     if (!newLabel) return;
-    
+
     const normalizedLabel = newLabel.toLowerCase() === 'refuse' ? 'REFUSE' : newLabel.toLowerCase();
-    
+
     if (!STYLES.includes(normalizedLabel) && normalizedLabel !== 'REFUSE') {
         showToast(`Invalid label: ${newLabel}`);
         return;
     }
-    
+
     try {
         const res = await fetch(`/api/history/${imageId}/relabel`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ label: normalizedLabel })
         });
-        
+
         const data = await res.json();
-        
+
         if (data.success) {
             showToast(`Relabeled to ${normalizedLabel}`);
             loadHistory(currentHistoryPage);
@@ -542,10 +615,10 @@ function showToast(message) {
         toast.className = 'toast';
         document.body.appendChild(toast);
     }
-    
+
     toast.textContent = message;
     toast.classList.add('show');
-    
+
     setTimeout(() => {
         toast.classList.remove('show');
     }, 2000);
@@ -559,39 +632,65 @@ function capitalize(s) {
     return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
 }
 
+function escapeHtml(value) {
+    return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+}
+
+function replayCurrentAudio() {
+    if (getTaskMediaType() !== 'audio') return;
+    const audio = document.getElementById('currentAudio');
+    if (!audio) return;
+    audio.currentTime = 0;
+    audio.play().catch(() => {});
+}
+
+function replayHistoryAudio(itemId) {
+    const audio = document.getElementById(`history-audio-${itemId}`);
+    if (!audio) return;
+    audio.currentTime = 0;
+    audio.play().catch(() => {});
+}
+
 // ============================================================================
 // Keyboard Shortcuts
 // ============================================================================
 
 document.addEventListener('keydown', (e) => {
-    // Ignore if typing in an input
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-    
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+
     const key = e.key.toLowerCase();
-    
-    // Undo
+
     if (key === 'z') {
         e.preventDefault();
         undoLast();
         return;
     }
-    
-    // History
+
     if (key === 'h') {
         e.preventDefault();
         showHistory();
         return;
     }
-    
-    // Escape closes modal
+
     if (key === 'escape') {
         closeStats();
         closeHistory();
         return;
     }
-    
-    // Style shortcuts
+
+    if (KEY_MAP[key] === 'REPLAY') {
+        e.preventDefault();
+        replayCurrentAudio();
+        return;
+    }
+
     if (KEY_MAP[key]) {
+        if (KEY_MAP[key] === 'BAD_QUALITY' && getTaskMediaType() !== 'image') return;
         e.preventDefault();
         label(KEY_MAP[key]);
     }
@@ -616,3 +715,5 @@ window.showHistory = showHistory;
 window.loadHistory = loadHistory;
 window.closeHistory = closeHistory;
 window.relabelFromHistory = relabelFromHistory;
+window.replayCurrentAudio = replayCurrentAudio;
+window.replayHistoryAudio = replayHistoryAudio;

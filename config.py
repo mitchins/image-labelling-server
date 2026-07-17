@@ -1,7 +1,7 @@
 """
 Configuration system for Smart Label.
 
-Allows customizing labels, image sources, and optional features per task.
+Allows customizing labels, media sources, and optional features per task.
 """
 
 from dataclasses import dataclass, field
@@ -27,6 +27,9 @@ class LabelConfig:
     
     # Database path
     db_path: str = "queue.db"
+
+    # Task media type
+    media_type: str = "image"
     
     # Optional hint/prediction field name in database (e.g., "predicted_style")
     # Set to None to disable hints
@@ -71,7 +74,7 @@ class LabelConfig:
             "description": self.description,
             "labels": self.labels,
             "label_colors": self.label_colors,
-            "db_path": self.db_path,
+            "media_type": self.media_type,
             "hint_field": self.hint_field,
             "hint_confidence_field": self.hint_confidence_field,
             "cluster_field": self.cluster_field,
@@ -100,6 +103,7 @@ class LabelConfig:
 ANIME_STYLE_CONFIG = LabelConfig(
     name="Anime Style Classification",
     description="Classify anime frames by visual style",
+    media_type="image",
     labels=["flat", "grim", "modern", "moe", "painterly", "retro"],
     label_colors={
         "flat": "#607D8B",

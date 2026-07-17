@@ -13,6 +13,9 @@ import random
 import sqlite3
 from pathlib import Path
 
+from config import LabelConfig
+from ingest_folder import write_config
+from media_utils import guess_media_type_from_path, normalize_media_type
 
 def parse_labels(label_arg: str) -> list:
     labels = [label.strip() for label in label_arg.split(",") if label.strip()]
@@ -45,6 +48,7 @@ def create_queue_db(db_path: Path, metadata_fields: list):
         CREATE TABLE queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             path TEXT UNIQUE,
+            media_type TEXT NOT NULL DEFAULT 'image',
             cluster_id INTEGER,
             predicted_style TEXT,
             predicted_confidence REAL,
@@ -86,6 +90,7 @@ def write_labels_and_settings(
     labels: list,
     name: str,
     description: str,
+    media_type: str,
     metadata_fields: list,
     hint_field: str,
     hint_confidence_field: str,
@@ -102,6 +107,7 @@ def write_labels_and_settings(
     settings = {
         "name": name,
         "description": description,
+        "media_type": media_type,
         "hint_field": hint_field,
         "hint_confidence_field": hint_confidence_field,
         "cluster_field": cluster_field,
@@ -117,30 +123,6 @@ def write_labels_and_settings(
     conn.close()
 
 
-def write_config(
-    config_path: Path,
-    db_path: Path,
-    labels: list,
-    name: str,
-    description: str,
-    metadata_fields: list,
-):
-    config = {
-        "name": name,
-        "description": description,
-        "labels": labels,
-        "label_colors": {},
-        "db_path": str(db_path),
-        "hint_field": "predicted_style",
-        "hint_confidence_field": "predicted_confidence",
-        "cluster_field": "cluster_id",
-        "metadata_fields": metadata_fields,
-    }
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=2)
-
-
 def load_jsonl(
     jsonl_path: Path,
     path_field: str,
@@ -150,6 +132,7 @@ def load_jsonl(
     metadata_fields: list,
     base_dir: Path,
     absolute_paths: bool,
+    media_type: str | None,
 ):
     items = []
     with jsonl_path.open("r", encoding="utf-8") as f:
@@ -178,6 +161,7 @@ def load_jsonl(
             items.append(
                 {
                     "path": str(path),
+                    "media_type": normalize_media_type(media_type) if media_type else guess_media_type_from_path(path),
                     "cluster_id": record.get(cluster_field),
                     "predicted_style": record.get(hint_field),
                     "predicted_confidence": record.get(hint_confidence_field),
@@ -194,6 +178,7 @@ def insert_items(db_path: Path, items: list, metadata_fields: list):
 
     base_columns = [
         "path",
+        "media_type",
         "cluster_id",
         "predicted_style",
         "predicted_confidence",
@@ -211,6 +196,7 @@ def insert_items(db_path: Path, items: list, metadata_fields: list):
     for item in items:
         row = [
             item["path"],
+            item["media_type"],
             item["cluster_id"],
             item["predicted_style"],
             item["predicted_confidence"],
@@ -245,8 +231,14 @@ def main():
     )
     parser.add_argument("--db", default="labeling_queue.db", help="Output SQLite database path")
     parser.add_argument("--config", default="labeling_task.json", help="Output config JSON path")
-    parser.add_argument("--name", default="Image Labeling Task", help="Task name shown in UI")
+    parser.add_argument("--name", default="Media Labeling Task", help="Task name shown in UI")
     parser.add_argument("--description", default="", help="Optional task description")
+    parser.add_argument(
+        "--media-type",
+        default="image",
+        choices=["image", "audio"],
+        help="Task media type for the reviewer UI",
+    )
     parser.add_argument(
         "--metadata-fields",
         default="",
@@ -313,6 +305,7 @@ def main():
         metadata_fields=metadata_fields,
         base_dir=base_dir,
         absolute_paths=args.absolute_paths,
+        media_type=args.media_type,
     )
 
     if not items:
@@ -332,6 +325,7 @@ def main():
         labels,
         args.name,
         args.description,
+        normalize_media_type(args.media_type),
         metadata_fields,
         args.hint_field,
         args.hint_confidence_field,
@@ -342,11 +336,17 @@ def main():
     config_path = Path(args.config)
     write_config(
         config_path,
-        db_path,
-        labels,
-        args.name,
-        args.description,
-        metadata_fields,
+        LabelConfig(
+            name=args.name,
+            description=args.description,
+            labels=labels,
+            db_path=str(db_path),
+            media_type=normalize_media_type(args.media_type),
+            hint_field=args.hint_field,
+            hint_confidence_field=args.hint_confidence_field,
+            cluster_field=args.cluster_field,
+            metadata_fields=metadata_fields,
+        ),
     )
 
     print(f"✓ Queue created: {db_path} ({len(items)} items)")

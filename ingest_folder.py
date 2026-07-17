@@ -12,17 +12,8 @@ import random
 import sqlite3
 from pathlib import Path
 
-
-IMAGE_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".webp",
-    ".bmp",
-    ".tif",
-    ".tiff",
-    ".gif",
-}
+from config import LabelConfig
+from media_utils import IMAGE_EXTENSIONS, collect_media
 
 
 def parse_labels(label_arg: str) -> list:
@@ -30,15 +21,7 @@ def parse_labels(label_arg: str) -> list:
     return labels
 
 
-def collect_images(root: Path, recursive: bool, extensions: set) -> list:
-    if recursive:
-        paths = [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in extensions]
-    else:
-        paths = [p for p in root.iterdir() if p.is_file() and p.suffix.lower() in extensions]
-    return paths
-
-
-def create_queue_db(db_path: Path, image_paths: list):
+def create_queue_db(db_path: Path, image_paths: list, media_type: str = "image"):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
@@ -52,6 +35,7 @@ def create_queue_db(db_path: Path, image_paths: list):
         CREATE TABLE queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             path TEXT UNIQUE,
+            media_type TEXT NOT NULL DEFAULT 'image',
             cluster_id INTEGER,
             predicted_style TEXT,
             predicted_confidence REAL,
@@ -88,6 +72,7 @@ def create_queue_db(db_path: Path, image_paths: list):
         """
         INSERT OR IGNORE INTO queue (
             path,
+            media_type,
             cluster_id,
             predicted_style,
             predicted_confidence,
@@ -96,15 +81,21 @@ def create_queue_db(db_path: Path, image_paths: list):
             quality_flag,
             session_id
         )
-        VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+        VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
         """,
-        [(str(p),) for p in image_paths],
+        [(str(p), media_type) for p in image_paths],
     )
 
     conn.commit()
     conn.close()
 
-def write_labels_and_settings(db_path: Path, labels: list, name: str, description: str):
+def write_labels_and_settings(
+    db_path: Path,
+    labels: list,
+    name: str,
+    description: str,
+    media_type: str = "image",
+):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
@@ -116,6 +107,7 @@ def write_labels_and_settings(db_path: Path, labels: list, name: str, descriptio
     settings = {
         "name": name,
         "description": description,
+        "media_type": media_type,
         "hint_field": None,
         "hint_confidence_field": None,
         "cluster_field": None,
@@ -131,21 +123,10 @@ def write_labels_and_settings(db_path: Path, labels: list, name: str, descriptio
     conn.close()
 
 
-def write_config(config_path: Path, db_path: Path, labels: list, name: str, description: str):
-    config = {
-        "name": name,
-        "description": description,
-        "labels": labels,
-        "label_colors": {},
-        "db_path": str(db_path),
-        "hint_field": None,
-        "hint_confidence_field": None,
-        "cluster_field": None,
-        "metadata_fields": [],
-    }
+def write_config(config_path: Path, config: LabelConfig):
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with open(config_path, "w") as f:
-        json.dump(config, f, indent=2)
+        json.dump({**config.to_dict(), "db_path": config.db_path}, f, indent=2)
 
 
 def main():
@@ -197,7 +178,7 @@ def main():
 
     extensions = {f".{ext.strip().lower()}" for ext in args.extensions.split(",") if ext.strip()}
 
-    image_paths = collect_images(image_root, args.recursive, extensions)
+    image_paths = collect_media(image_root, args.recursive, extensions)
     if not image_paths:
         raise SystemExit(f"No images found in {image_root} with extensions: {sorted(extensions)}")
 
@@ -212,11 +193,24 @@ def main():
 
     db_path = Path(args.db)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    create_queue_db(db_path, image_paths)
-    write_labels_and_settings(db_path, labels, args.name, args.description)
+    create_queue_db(db_path, image_paths, media_type="image")
+    write_labels_and_settings(db_path, labels, args.name, args.description, media_type="image")
 
     config_path = Path(args.config)
-    write_config(config_path, db_path, labels, args.name, args.description)
+    write_config(
+        config_path,
+        LabelConfig(
+            name=args.name,
+            description=args.description,
+            labels=labels,
+            db_path=str(db_path),
+            media_type="image",
+            hint_field=None,
+            hint_confidence_field=None,
+            cluster_field=None,
+            metadata_fields=[],
+        ),
+    )
 
     print(f"✓ Queue created: {db_path} ({len(image_paths)} images)")
     print(f"✓ Config written: {config_path}")

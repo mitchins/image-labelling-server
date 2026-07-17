@@ -1,6 +1,6 @@
-# Image Labeling Server (smart_label)
+# Media Labeling Server (smart_label)
 
-Fast, configurable web UI for labeling images with keyboard shortcuts.
+Fast, configurable web UI for labeling images or short audio clips with keyboard shortcuts.
 
 ## Read This First: Repo Layout and How to Run
 
@@ -54,6 +54,16 @@ python -m smart_label serve --db labeling_queue.db --config labeling_task.json
 # Open http://localhost:8765
 ```
 
+### 1b) Folder of audio clips
+
+```bash
+python -m smart_label ingest-audio \
+  --audio /path/to/clips \
+  --labels positive,negative,neutral
+
+python -m smart_label serve --db labeling_queue.db --config labeling_task.json
+```
+
 ### 2) JSONL list (paths + metadata + hints)
 
 Example JSONL line:
@@ -76,6 +86,7 @@ python -m smart_label serve --db labeling_queue.db --config labeling_task.json
 Notes:
 - `path` is required (use `--path-field` if your JSONL uses another key).
 - Relative paths can be resolved with `--base-dir /path/to/images`.
+- Use `--media-type audio` when the JSONL rows point to audio clips.
 - Optional hint fields: `predicted_style`, `predicted_confidence`.
 - Optional cluster field: `cluster_id` (enables replacement on refuse).
 
@@ -95,6 +106,7 @@ Create a config file to use Smart Label for any classification task:
 # my_task.yaml
 name: "Object Classification"
 description: "Label objects in images"
+media_type: "image"               # or "audio"
 labels: ["car", "bike", "person", "building", "other"]
 label_colors:
   car: "#1976D2"
@@ -119,7 +131,8 @@ python -m smart_label serve --config my_task.yaml
 |-----|--------|
 | 1-9 | Assign label (in order) |
 | X / Space | Refuse (ambiguous) |
-| Q | Bad quality |
+| Q | Bad quality (image tasks) |
+| R | Replay audio |
 | Z | Undo last |
 | H | History |
 | Esc | Close modal |
@@ -129,7 +142,8 @@ python -m smart_label serve --config my_task.yaml
 ```sql
 CREATE TABLE queue (
     id INTEGER PRIMARY KEY,
-    path TEXT UNIQUE,              -- Image file path
+    path TEXT UNIQUE,              -- Media file path
+    media_type TEXT NOT NULL,      -- 'image' or 'audio'
     cluster_id INTEGER,            -- Optional clustering
     predicted_style TEXT,          -- Optional model hint
     predicted_confidence REAL,
@@ -157,8 +171,9 @@ CREATE TABLE settings (
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/config` | GET | Current labeling configuration |
-| `/api/next` | GET | Next unlabeled image |
-| `/api/label` | POST | Submit label for current image |
+| `/api/next` | GET | Next unlabeled item |
+| `/api/label` | POST | Submit label for current item |
+| `/api/media/{id}` | GET | Fetch image/audio file |
 | `/api/stats` | GET | Label distribution stats |
 | `/api/history` | GET | Paginated history (filter by label) |
 | `/api/history/{id}/relabel` | POST | Change existing label |

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Smart Label - Configurable image labeling server.
+Smart Label - Configurable media labeling server.
 
-A reusable FastAPI server for rapid human labeling of images.
+A reusable FastAPI server for rapid human labeling of images and audio.
 Configure labels, hints, clustering, and metadata per task.
 
 Usage:
@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
+from media_utils import guess_media_type_from_path, guess_mime_type
 
 # Lazy imports for optional heavy dependencies
 torch = None
@@ -48,6 +49,8 @@ app.add_middleware(
 
 # Mount static files directory
 static_dir = Path(__file__).parent / "static"
+if not static_dir.exists():
+    static_dir = Path(__file__).parent.parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
@@ -65,7 +68,7 @@ def get_db():
 
 def build_select_columns() -> str:
     """Build SELECT clause with base columns and optional metadata."""
-    cols = ["id", "path", "cluster_id", "predicted_style", "predicted_confidence"]
+    cols = ["id", "path", "media_type", "cluster_id", "predicted_style", "predicted_confidence"]
     
     if CONFIG and CONFIG.metadata_fields:
         cols.extend(CONFIG.metadata_fields)
@@ -129,6 +132,7 @@ def load_config_from_db(db_path: str):
         labels=labels,
         label_colors=label_colors,
         db_path=db_path,
+        media_type=settings.get("media_type") or "image",
         hint_field=settings.get("hint_field"),
         hint_confidence_field=settings.get("hint_confidence_field"),
         cluster_field=settings.get("cluster_field"),
@@ -150,6 +154,7 @@ def build_image_response(row) -> dict:
     response = {
         "id": row["id"],
         "path": row["path"],
+        "media_type": row["media_type"] if "media_type" in row.keys() else (CONFIG.media_type if CONFIG else guess_media_type_from_path(row["path"])),
         "cluster_id": row["cluster_id"],
         "predicted_style": row["predicted_style"],
         "predicted_confidence": row["predicted_confidence"],
@@ -218,7 +223,6 @@ def get_valid_labels() -> list:
 @app.get("/")
 async def index():
     """Serve the main labeling UI."""
-    static_dir = Path(__file__).parent / "static"
     index_path = static_dir / "index.html"
     if index_path.exists():
         return FileResponse(index_path)
@@ -247,7 +251,7 @@ async def get_next_image(session_id: str = Query(default=None)):
         row = cur.fetchone()
         
         if not row:
-            return JSONResponse({"done": True, "message": "All images labeled!"})
+            return JSONResponse({"done": True, "message": "All items labeled!"})
         
         # Get stats (only count 1-6 labels, not REFUSE)
         progress = get_progress_stats(cur)
@@ -299,7 +303,7 @@ async def get_replacement(cluster_id: str = PathParam(..., description="Cluster 
             row = cur.fetchone()
             
             if not row:
-                return JSONResponse({"done": True, "message": "All images labeled!"})
+                return JSONResponse({"done": True, "message": "All items labeled!"})
         else:
             # Try to convert to int
             try:
@@ -316,7 +320,7 @@ async def get_replacement(cluster_id: str = PathParam(..., description="Cluster 
                 row = cur.fetchone()
                 
                 if not row:
-                    return JSONResponse({"done": True, "message": "All images labeled!"})
+                    return JSONResponse({"done": True, "message": "All items labeled!"})
             else:
                 # Get an unlabeled frame from the same cluster
                 cur.execute(f"""
@@ -340,7 +344,7 @@ async def get_replacement(cluster_id: str = PathParam(..., description="Cluster 
                     row = cur.fetchone()
                     
                     if not row:
-                        return JSONResponse({"done": True, "message": "All images labeled!"})
+                        return JSONResponse({"done": True, "message": "All items labeled!"})
         
         # Get stats (only count 1-6 labels, not REFUSE)
         progress = get_progress_stats(cur)
@@ -354,7 +358,7 @@ async def get_replacement(cluster_id: str = PathParam(..., description="Cluster 
 
 @app.post("/api/label")
 async def label_image(request: LabelRequest):
-    """Label an image."""
+    """Label an item."""
     valid_labels = get_valid_labels()
     if request.label not in valid_labels:
         raise HTTPException(status_code=400, detail=f"Invalid label: {request.label}. Valid: {valid_labels}")
@@ -368,11 +372,14 @@ async def label_image(request: LabelRequest):
         cur.execute("""
             UPDATE queue 
             SET human_label = ?, quality_flag = ?, labeled_at = ?, session_id = ?
-            WHERE id = ?
+            WHERE id = ? AND human_label IS NULL
         """, (request.label, request.quality_flag, datetime.now().isoformat(), session_id, request.image_id))
         
         if cur.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Image not found")
+            cur.execute("SELECT 1 FROM queue WHERE id = ?", (request.image_id,))
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Item not found")
+            raise HTTPException(status_code=409, detail="Item already labeled; reload for the next item")
         
         # Update session
         cur.execute("""
@@ -435,22 +442,37 @@ async def get_stats():
         )
 
 
-@app.get("/api/image/{image_id}")
-async def get_image(image_id: int):
-    """Get image file by database ID."""
+def _get_media_response(image_id: int, expected_media_type: Optional[str] = None):
+    """Get media file by database ID."""
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT path FROM queue WHERE id = ?", (image_id,))
+        cur.execute("SELECT path, media_type FROM queue WHERE id = ?", (image_id,))
         row = cur.fetchone()
         
         if not row:
-            raise HTTPException(status_code=404, detail="Image not found")
+            raise HTTPException(status_code=404, detail="Item not found")
         
         path = Path(row["path"])
         if not path.exists():
-            raise HTTPException(status_code=404, detail=f"Image file not found: {path}")
+            raise HTTPException(status_code=404, detail=f"Media file not found: {path}")
+
+        media_type = row["media_type"] if "media_type" in row.keys() else guess_media_type_from_path(path)
+        if expected_media_type and media_type != expected_media_type:
+            raise HTTPException(status_code=400, detail=f"Requested {expected_media_type} for a {media_type} item")
         
-        return FileResponse(path, media_type="image/jpeg")
+        return FileResponse(path, media_type=guess_mime_type(path, media_type))
+
+
+@app.get("/api/media/{image_id}")
+async def get_media(image_id: int):
+    """Get media file by database ID."""
+    return _get_media_response(image_id)
+
+
+@app.get("/api/image/{image_id}")
+async def get_image(image_id: int):
+    """Backward-compatible alias for image tasks."""
+    return _get_media_response(image_id, expected_media_type="image")
 
 
 @app.get("/api/export")
@@ -459,7 +481,7 @@ async def export_labels():
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("""
-            SELECT path, human_label, cluster_id, predicted_style, labeled_at
+            SELECT path, media_type, human_label, cluster_id, predicted_style, labeled_at
             FROM queue
             WHERE human_label IS NOT NULL
             ORDER BY labeled_at
@@ -468,6 +490,7 @@ async def export_labels():
         labels = [
             {
                 "path": row["path"],
+                "media_type": row["media_type"] if "media_type" in row.keys() else guess_media_type_from_path(row["path"]),
                 "label": row["human_label"],
                 "cluster_id": row["cluster_id"],
                 "predicted_style": row["predicted_style"],
@@ -487,6 +510,7 @@ async def get_config():
     # Fallback for backward compatibility
     return JSONResponse({
         "name": "Smart Label",
+        "media_type": "image",
         "labels": ["flat", "grim", "modern", "moe", "painterly", "retro"],
         "hint_field": "predicted_style",
         "cluster_field": "cluster_id",
@@ -518,7 +542,7 @@ async def get_history(
         total = cur.fetchone()[0]
         
         # Build select with metadata
-        select_cols = "id, path, human_label, cluster_id, predicted_style, predicted_confidence, labeled_at, quality_flag"
+        select_cols = "id, path, media_type, human_label, cluster_id, predicted_style, predicted_confidence, labeled_at, quality_flag"
         if CONFIG and CONFIG.metadata_fields:
             select_cols += ", " + ", ".join(CONFIG.metadata_fields)
         
@@ -536,6 +560,7 @@ async def get_history(
             item = {
                 "id": row["id"],
                 "path": row["path"],
+                "media_type": row["media_type"] if "media_type" in row.keys() else guess_media_type_from_path(row["path"]),
                 "label": row["human_label"],
                 "cluster_id": row["cluster_id"],
                 "predicted_style": row["predicted_style"],
@@ -602,13 +627,16 @@ async def get_garbage_rating(image_id: int):
     
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT path FROM queue WHERE id = ?", (image_id,))
+        cur.execute("SELECT path, media_type FROM queue WHERE id = ?", (image_id,))
         row = cur.fetchone()
         
         if not row:
             raise HTTPException(status_code=404, detail="Image not found")
         
         path = Path(row["path"])
+        media_type = row["media_type"] if "media_type" in row.keys() else guess_media_type_from_path(path)
+        if media_type != "image":
+            raise HTTPException(status_code=400, detail="Garbage rating is only available for image tasks")
         if not path.exists():
             raise HTTPException(status_code=404, detail=f"Image file not found: {path}")
     
@@ -668,18 +696,22 @@ async def get_garbage_rating(image_id: int):
         }
 
 @app.post("/api/undo")
-async def undo_last():
+async def undo_last(session_id: Optional[str] = Query(default=None)):
     """Undo the most recent label."""
     with get_db() as conn:
         cur = conn.cursor()
         
         # Find most recent
-        cur.execute("""
+        query = """
             SELECT id, path FROM queue
             WHERE human_label IS NOT NULL
-            ORDER BY labeled_at DESC
-            LIMIT 1
-        """)
+        """
+        params = []
+        if session_id:
+            query += " AND session_id = ?"
+            params.append(session_id)
+        query += " ORDER BY labeled_at DESC LIMIT 1"
+        cur.execute(query, params)
         row = cur.fetchone()
         
         if not row:
@@ -688,7 +720,7 @@ async def undo_last():
         # Clear it
         cur.execute("""
             UPDATE queue
-            SET human_label = NULL, labeled_at = NULL, session_id = NULL
+            SET human_label = NULL, labeled_at = NULL, quality_flag = NULL, session_id = NULL
             WHERE id = ?
         """, (row["id"],))
         conn.commit()

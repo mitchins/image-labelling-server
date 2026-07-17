@@ -5,7 +5,7 @@ import tempfile
 import sqlite3
 from pathlib import Path
 from fastapi.testclient import TestClient
-from smart_label.config import LabelConfig
+from config import LabelConfig
 
 
 @pytest.fixture
@@ -20,6 +20,7 @@ def test_db():
         CREATE TABLE queue (
             id INTEGER PRIMARY KEY,
             path TEXT UNIQUE,
+            media_type TEXT NOT NULL DEFAULT 'image',
             cluster_id INTEGER,
             predicted_style TEXT,
             predicted_confidence REAL,
@@ -33,14 +34,14 @@ def test_db():
     # Insert test data
     conn.execute("""
         INSERT INTO queue (path, cluster_id, predicted_style, predicted_confidence)
-        VALUES (?, ?, ?, ?)
-    """, ("/test/image1.jpg", 1, "modern", 0.8))
+        VALUES (?, ?, ?, ?, ?)
+    """, ("/test/image1.jpg", "image", 1, "modern", 0.8))
     
     conn.execute("""
         INSERT INTO queue (path, cluster_id, predicted_style, predicted_confidence, 
                           human_label, labeled_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, ("/test/image2.jpg", 2, "moe", 0.9, "moe", "2024-01-01T12:00:00"))
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, ("/test/image2.jpg", "image", 2, "moe", 0.9, "moe", "2024-01-01T12:00:00"))
     
     conn.commit()
     conn.close()
@@ -58,6 +59,7 @@ def test_config(test_db):
         name="Test Task",
         labels=["flat", "grim", "modern", "moe"],
         db_path=test_db,
+        media_type="image",
         hint_field="predicted_style",
         cluster_field="cluster_id",
         garbage_classifier_path=None  # Disable for tests
@@ -68,13 +70,13 @@ def test_config(test_db):
 def client(test_config, monkeypatch):
     """Create a test client with test configuration."""
     # Import here to avoid circular imports
-    import smart_label.server as server_module
+    import server as server_module
     
     # Override the global CONFIG
     monkeypatch.setattr(server_module, 'CONFIG', test_config)
     monkeypatch.setattr(server_module, 'DB_PATH', test_config.db_path)
     
-    from smart_label.server import app
+    from server import app
     return TestClient(app)
 
 
@@ -88,6 +90,7 @@ class TestConfigEndpoint:
         
         data = response.json()
         assert data["name"] == "Test Task"
+        assert data["media_type"] == "image"
         assert len(data["labels"]) == 4
         assert "flat" in data["labels"]
         assert data["hint_field"] == "predicted_style"
