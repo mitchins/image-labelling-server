@@ -32,6 +32,9 @@ def build_export_payload(conn: sqlite3.Connection, exclude_refuse: bool = False,
             "ontology": getattr(config, "ontology", settings.get("ontology", [])),
             "metadata_fields": getattr(config, "metadata_fields", settings.get("metadata_fields", [])),
         })
+    if settings.get("mode") == "ranking":
+        from ranking_store import build_ranking_export
+        return build_ranking_export(conn)
     if settings.get("mode") == "ontology_confirmation":
         metadata_fields = validate_metadata_fields(settings.get("metadata_fields") or [])
         columns = [

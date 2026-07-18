@@ -23,11 +23,21 @@ from fastapi.params import Path as PathParam
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 import uvicorn
 from config import decode_metadata_value, quote_identifier, validate_metadata_fields
 from export_utils import build_export_payload
 from media_utils import guess_media_type_from_path, guess_mime_type
+from ranking_store import (
+    RankingStoreError,
+    build_ranking_export,
+    get_latest_completed_sets as get_latest_ranking_sets,
+    get_next_set as get_next_ranking_set,
+    get_set as get_ranking_set,
+    get_stats as get_ranking_stats,
+    submit_revision as submit_ranking_revision,
+    undo_last_for_session as undo_last_ranking,
+)
 
 # Lazy imports for optional heavy dependencies
 torch = None
@@ -102,34 +112,11 @@ def _table_exists(cur, table_name: str) -> bool:
 
 def load_config_from_db(db_path: str):
     """Load label config from database tables if present."""
-    from .config import LabelConfig
+    from config import LabelConfig
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-
-    if not _table_exists(cur, "labels"):
-        conn.close()
-        return None
-
-    cur.execute(
-        """
-        SELECT name, color, sort_order
-        FROM labels
-        ORDER BY (sort_order IS NULL), sort_order, name
-        """
-    )
-    label_rows = cur.fetchall()
-    if not label_rows:
-        conn.close()
-        return None
-
-    labels = [row["name"] for row in label_rows]
-    label_colors = {
-        row["name"]: row["color"]
-        for row in label_rows
-        if row["color"]
-    }
 
     settings = {}
     if _table_exists(cur, "settings"):
@@ -140,6 +127,33 @@ def load_config_from_db(db_path: str):
             except json.JSONDecodeError:
                 settings[row["key"]] = row["value"]
 
+    if _table_exists(cur, "ranking_tasks"):
+        task_row = cur.execute(
+            "SELECT mode, criterion_json, task_settings_json FROM ranking_tasks WHERE task_id = 1"
+        ).fetchone()
+        if task_row:
+            task_settings = json.loads(task_row["task_settings_json"])
+            settings = {**task_settings, **settings}
+            settings["mode"] = task_row["mode"]
+            settings["ranking_criterion"] = json.loads(task_row["criterion_json"])
+
+    label_rows = []
+    if _table_exists(cur, "labels"):
+        cur.execute(
+            """
+            SELECT name, color, sort_order
+            FROM labels
+            ORDER BY (sort_order IS NULL), sort_order, name
+            """
+        )
+        label_rows = cur.fetchall()
+    if not label_rows and settings.get("mode") != "ranking":
+        conn.close()
+        return None
+
+    labels = [row["name"] for row in label_rows]
+    label_colors = {row["name"]: row["color"] for row in label_rows if row["color"]}
+
     conn.close()
 
     return LabelConfig(
@@ -149,6 +163,7 @@ def load_config_from_db(db_path: str):
         ontology_id=settings.get("ontology_id"),
         ontology_version=settings.get("ontology_version"),
         ontology=settings.get("ontology") or [],
+        ranking_criterion=settings.get("ranking_criterion"),
         labels=labels,
         label_colors=label_colors,
         db_path=db_path,
@@ -159,6 +174,52 @@ def load_config_from_db(db_path: str):
         metadata_fields=settings.get("metadata_fields") or [],
         garbage_classifier_path=None,
     )
+
+
+def get_database_ranking_criterion(db_path) -> dict:
+    """Read the immutable criterion attached to a ranking database."""
+    owns_connection = not isinstance(db_path, sqlite3.Connection)
+    conn = sqlite3.connect(db_path) if owns_connection else db_path
+    try:
+        has_task = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ranking_tasks'"
+        ).fetchone()
+        if has_task:
+            row = conn.execute(
+                "SELECT criterion_json FROM ranking_tasks WHERE task_id = 1"
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT criterion_json FROM ranking_sets LIMIT 1").fetchone()
+    finally:
+        if owns_connection:
+            conn.close()
+    if row is None:
+        raise ValueError("Ranking database has no task criterion")
+    return json.loads(row[0])
+
+
+def public_ranking_set(ranking_set: dict) -> dict:
+    """Attach opaque media URLs and remove private filesystem locations."""
+    from urllib.parse import urlencode
+
+    for candidate in ranking_set.get("candidates", []):
+        candidate["url"] = "/api/ranking/media?" + urlencode({
+            "set_id": ranking_set["set_id"],
+            "candidate_id": candidate["candidate_id"],
+        })
+        candidate.pop("path", None)
+    return ranking_set
+
+
+def validate_ranking_criterion(db_path: str, config) -> dict:
+    """Prevent collecting labels under a prompt that export will not record."""
+    database_criterion = get_database_ranking_criterion(db_path)
+    configured_criterion = getattr(config, "ranking_criterion", None)
+    if configured_criterion != database_criterion:
+        raise ValueError(
+            "Configured ranking_criterion does not match the database criterion"
+        )
+    return database_criterion
 
 
 def safe_get_metadata(row, field: str):
@@ -224,6 +285,14 @@ def is_confirmation_mode():
     return confirmation_config() is not None
 
 
+def is_ranking_mode():
+    return bool(CONFIG and getattr(CONFIG, "mode", "classification") == "ranking")
+
+
+def ranking_error(exc: RankingStoreError):
+    raise HTTPException(status_code=getattr(exc, "status_code", 400), detail=str(exc)) from exc
+
+
 def ontology_values():
     config = confirmation_config() or {}
     return [entry.get("id") for entry in config.get("ontology", []) if isinstance(entry, dict)]
@@ -255,6 +324,28 @@ class RelabelRequest(BaseModel):
     quality_flag: Optional[str] = None  # Optional flag (e.g., BAD_QUALITY)
     confirmation: Optional[str] = None
     session_id: Optional[str] = None
+
+
+class RankingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    set_id: str
+    request_id: str
+    expected_revision: int
+    session_id: str
+    outcome: str
+    ordered_candidate_ids: list[str] = Field(default_factory=list)
+    invalid_reason: Optional[str] = None
+
+
+class RankingUndoRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    expected_set_id: str
+    expected_revision: int
+    target_revision: int
+    session_id: str
 
 
 class StatsResponse(BaseModel):
@@ -291,6 +382,17 @@ async def index():
 @app.get("/api/next")
 async def get_next_image(session_id: str = Query(default=None)):
     """Get the next unlabeled image."""
+    if is_ranking_mode():
+        try:
+            ranking_set = get_next_ranking_set(DB_PATH, session_id=session_id)
+            progress = get_ranking_stats(DB_PATH)
+        except RankingStoreError as exc:
+            ranking_error(exc)
+        if ranking_set is None:
+            return {"done": True, "message": "All sets ranked!", "progress": progress}
+        ranking_set["criterion"] = get_database_ranking_criterion(DB_PATH)
+        public_ranking_set(ranking_set)
+        return {"done": False, "set": ranking_set, "progress": progress}
     with get_db() as conn:
         cur = conn.cursor()
         
@@ -485,9 +587,27 @@ async def label_image(request: LabelRequest):
         }
 
 
+@app.post("/api/rank")
+async def rank_set(request: RankingRequest):
+    """Append one strict set-level ranking revision."""
+    if not is_ranking_mode():
+        raise HTTPException(status_code=404, detail="Ranking mode is not active")
+    try:
+        result = submit_ranking_revision(DB_PATH, request.model_dump())
+        progress = get_ranking_stats(DB_PATH)
+    except RankingStoreError as exc:
+        ranking_error(exc)
+    return {"success": True, "revision": result, "progress": progress}
+
+
 @app.get("/api/stats")
 async def get_stats():
     """Get labeling statistics."""
+    if is_ranking_mode():
+        try:
+            return get_ranking_stats(DB_PATH)
+        except RankingStoreError as exc:
+            ranking_error(exc)
     with get_db() as conn:
         cur = conn.cursor()
         
@@ -527,6 +647,27 @@ async def get_stats():
         )
 
 
+@app.get("/api/ranking/media")
+async def get_ranking_media(set_id: str, candidate_id: str):
+    """Deliver a ranking candidate without exposing filesystem access to the browser."""
+    if not is_ranking_mode():
+        raise HTTPException(status_code=404, detail="Ranking mode is not active")
+    try:
+        ranking_set = get_ranking_set(DB_PATH, set_id)
+    except RankingStoreError as exc:
+        ranking_error(exc)
+    candidate = next(
+        (item for item in ranking_set["candidates"] if item["candidate_id"] == candidate_id), None
+    )
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    path = Path(candidate["path"])
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Media file not found")
+    media_type = candidate.get("media_type") or guess_media_type_from_path(path)
+    return FileResponse(path, media_type=guess_mime_type(path, media_type))
+
+
 def _get_media_response(image_id: int, expected_media_type: Optional[str] = None):
     """Get media file by database ID."""
     with get_db() as conn:
@@ -539,7 +680,7 @@ def _get_media_response(image_id: int, expected_media_type: Optional[str] = None
         
         path = Path(row["path"])
         if not path.exists():
-            raise HTTPException(status_code=404, detail=f"Media file not found: {path}")
+            raise HTTPException(status_code=404, detail="Media file not found")
 
         media_type = row["media_type"] if "media_type" in row.keys() else guess_media_type_from_path(path)
         if expected_media_type and media_type != expected_media_type:
@@ -563,6 +704,11 @@ async def get_image(image_id: int):
 @app.get("/api/export")
 async def export_labels():
     """Export all labeled data as JSON."""
+    if is_ranking_mode():
+        try:
+            return JSONResponse(build_ranking_export(DB_PATH))
+        except RankingStoreError as exc:
+            ranking_error(exc)
     with get_db() as conn:
         return JSONResponse(build_export_payload(conn, config=CONFIG))
 
@@ -589,6 +735,16 @@ async def get_history(
     label_filter: Optional[str] = Query(default=None)
 ):
     """Get labeling history for review, newest first."""
+    if is_ranking_mode():
+        try:
+            result = get_latest_ranking_sets(
+                DB_PATH, limit=per_page, offset=(page - 1) * per_page
+            )
+            items = [public_ranking_set(item) for item in result["items"]]
+        except RankingStoreError as exc:
+            ranking_error(exc)
+        return {"items": items, "total": result["total"],
+                "page": page, "per_page": per_page}
     with get_db() as conn:
         cur = conn.cursor()
         
@@ -654,6 +810,19 @@ async def get_history(
             "per_page": per_page,
             "total_pages": (total + per_page - 1) // per_page if total > 0 else 1
         }
+
+
+@app.post("/api/history/rerank")
+async def rerank_set(request: RankingRequest):
+    """Append a correction revision for a previously reviewed ranking set."""
+    if not is_ranking_mode():
+        raise HTTPException(status_code=404, detail="Ranking mode is not active")
+    try:
+        result = submit_ranking_revision(DB_PATH, request.model_dump())
+        progress = get_ranking_stats(DB_PATH)
+    except RankingStoreError as exc:
+        ranking_error(exc)
+    return {"success": True, "revision": result, "progress": progress}
 
 
 @app.post("/api/history/{image_id}/relabel")
@@ -723,7 +892,7 @@ async def get_garbage_rating(image_id: int):
         if media_type != "image":
             raise HTTPException(status_code=400, detail="Garbage rating is only available for image tasks")
         if not path.exists():
-            raise HTTPException(status_code=404, detail=f"Image file not found: {path}")
+            raise HTTPException(status_code=404, detail="Image file not found")
     
     try:
         # Lazy import torch dependencies
@@ -781,8 +950,32 @@ async def get_garbage_rating(image_id: int):
         }
 
 @app.post("/api/undo")
-async def undo_last(session_id: Optional[str] = Query(default=None)):
+async def undo_last(
+    ranking_undo: Optional[RankingUndoRequest] = None,
+    session_id: Optional[str] = Query(default=None),
+):
     """Undo the most recent label."""
+    if is_ranking_mode():
+        if ranking_undo is not None:
+            session_id = ranking_undo.session_id
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id is required")
+        try:
+            revision = undo_last_ranking(
+                DB_PATH,
+                session_id,
+                **(ranking_undo.model_dump(exclude={"session_id"}) if ranking_undo else {}),
+            )
+            progress = get_ranking_stats(DB_PATH)
+            ranking_set = get_ranking_set(DB_PATH, revision["set_id"])
+            ranking_set["criterion"] = get_database_ranking_criterion(DB_PATH)
+            public_ranking_set(ranking_set)
+        except RankingStoreError as exc:
+            if getattr(exc, "status_code", None) == 404:
+                return {"success": False, "message": str(exc)}
+            ranking_error(exc)
+        return {"success": True, "revision": revision, "set": ranking_set,
+                "item": {"set": ranking_set, "progress": progress}, "progress": progress}
     with get_db() as conn:
         cur = conn.cursor()
         
@@ -1433,6 +1626,12 @@ def main():
         print(f"Error: Database not found: {DB_PATH}")
         print("Run prepare.py or ingest to create the queue database")
         return 1
+    if is_ranking_mode():
+        try:
+            validate_ranking_criterion(DB_PATH, CONFIG)
+        except (ValueError, sqlite3.Error, json.JSONDecodeError) as exc:
+            print(f"Error: {exc}")
+            return 1
     
     # Override garbage classifier from CLI if provided
     classifier_path = args.garbage_classifier or CONFIG.garbage_classifier_path
@@ -1445,11 +1644,17 @@ def main():
     print(f"Task: {CONFIG.name}")
     print(f"Database: {DB_PATH}")
     print(f"URL: http://localhost:{args.port}")
-    print(f"\nLabels: {', '.join(CONFIG.labels)}")
-    if is_confirmation_mode():
+    if is_ranking_mode():
+        criterion = CONFIG.ranking_criterion
+        print(f"\nCriterion: {criterion['prompt']} ({criterion['id']}@{criterion['version']})")
+        print("Shortcuts: number keys build the order; Enter submits")
+        print("           R=replay  Z=undo  H=history  X=invalid")
+    elif is_confirmation_mode():
+        print(f"\nLabels: {', '.join(CONFIG.labels)}")
         print("Shortcuts: 1=STRONG 2=LOOSE 3=NONE 4=INVALID")
         print("           R=replay  Z=undo  H=history")
     else:
+        print(f"\nLabels: {', '.join(CONFIG.labels)}")
         print(f"Shortcuts: {' '.join(f'{i+1}={l}' for i, l in enumerate(CONFIG.labels[:9]))}")
         print("           X/Space=refuse  Z=undo  Q=bad quality")
     print(f"{'='*50}\n")

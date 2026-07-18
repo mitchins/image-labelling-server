@@ -71,6 +71,7 @@ class LabelConfig:
     ontology_id: Optional[str] = None
     ontology_version: Optional[str] = None
     ontology: list = field(default_factory=list)
+    ranking_criterion: Optional[dict] = None
     
     # Labels: list of valid label names (order determines keyboard shortcuts 1-9)
     labels: list = field(default_factory=lambda: ["label_1", "label_2", "label_3"])
@@ -106,7 +107,7 @@ class LabelConfig:
 
     def __post_init__(self):
         validate_metadata_fields(self.metadata_fields)
-        if self.mode not in {"classification", "ontology_confirmation"}:
+        if self.mode not in {"classification", "ontology_confirmation", "ranking"}:
             raise ValueError(f"Unsupported labeling mode: {self.mode}")
         if self.mode == "ontology_confirmation":
             if not self.ontology_id or not self.ontology_version:
@@ -126,6 +127,19 @@ class LabelConfig:
                 ids.append(entry["id"])
             if len(ids) != len(set(ids)):
                 raise ValueError("Ontology entry ids must be unique")
+        if self.mode == "ranking":
+            criterion = self.ranking_criterion
+            if not isinstance(criterion, dict):
+                raise ValueError("Ranking mode requires ranking_criterion")
+            if set(criterion) != {"id", "version", "prompt", "direction"}:
+                raise ValueError(
+                    "Ranking criterion must contain exactly id, version, prompt, and direction"
+                )
+            required = ("id", "version", "prompt")
+            if any(not isinstance(criterion.get(key), str) or not criterion[key].strip() for key in required):
+                raise ValueError("Ranking criterion requires non-empty id, version, and prompt")
+            if criterion.get("direction") != "most":
+                raise ValueError("Ranking criterion direction must be 'most'")
     
     @classmethod
     def from_file(cls, path: str) -> "LabelConfig":
@@ -152,6 +166,7 @@ class LabelConfig:
             "ontology_id": self.ontology_id,
             "ontology_version": self.ontology_version,
             "ontology": self.ontology,
+            "ranking_criterion": self.ranking_criterion,
             "labels": self.labels,
             "label_colors": self.label_colors,
             "media_type": self.media_type,

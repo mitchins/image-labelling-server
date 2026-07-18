@@ -17,6 +17,15 @@ function generateUUID() {
 
 // State
 let currentItem = null;
+let currentRankingSet = null;
+let rankingDraft = [];
+let rankingSubmitting = false;
+let rankingFocusedCandidateId = null;
+const pendingRankingRequests = new Map();
+let pendingRankingUndo = null;
+let rankingUndoInFlight = false;
+const rankingSubmissionStack = [];
+const historyCorrectionStates = new WeakMap();
 let preloadedImages = [];
 let isLabeling = false;
 let lastSubmitAt = 0;
@@ -31,6 +40,79 @@ let KEY_MAP = {};
 
 function isConfirmationMode() {
     return CONFIG?.mode === 'ontology_confirmation';
+}
+
+function isRankingMode() {
+    return CONFIG?.mode === 'ranking';
+}
+
+function getRankingSetId(set = currentRankingSet) {
+    return set?.set_id ?? set?.id;
+}
+
+function getCandidateId(candidate) {
+    return candidate?.candidate_id ?? candidate?.id;
+}
+
+function getCandidateDisplayPosition(candidate, fallbackPosition = 1) {
+    const position = Number(candidate?.display_position);
+    return Number.isFinite(position) && position > 0 ? position : fallbackPosition;
+}
+
+function getRankingCandidates(set = currentRankingSet) {
+    return Array.isArray(set?.candidates)
+        ? set.candidates.slice().sort((a, b) => getCandidateDisplayPosition(a) - getCandidateDisplayPosition(b))
+        : [];
+}
+
+function rankingPayloadKey(payload) {
+    return JSON.stringify(payload);
+}
+
+function rankingRequestStateKey(payload, operation, endpoint) {
+    return `${operation}:${endpoint}:${rankingPayloadKey(payload)}`;
+}
+
+function getRankingRequestId(payload, operation = 'submit', endpoint = '/api/rank') {
+    const key = rankingPayloadKey(payload);
+    const stateKey = rankingRequestStateKey(payload, operation, endpoint);
+    const pending = pendingRankingRequests.get(stateKey);
+    if (!pending || pending.key !== key) {
+        pendingRankingRequests.set(stateKey, { key, requestId: generateUUID() });
+    }
+    return pendingRankingRequests.get(stateKey).requestId;
+}
+
+function clearPendingRankingRequest(payload = null, operation = 'submit', endpoint = '/api/rank') {
+    const scope = `${operation}:${endpoint}:`;
+    if (!payload) {
+        for (const stateKey of pendingRankingRequests.keys()) {
+            if (stateKey.startsWith(scope)) pendingRankingRequests.delete(stateKey);
+        }
+        return;
+    }
+    const stateKey = rankingRequestStateKey(payload, operation, endpoint);
+    if (pendingRankingRequests.get(stateKey)?.key === rankingPayloadKey(payload)) {
+        pendingRankingRequests.delete(stateKey);
+    }
+}
+
+function isDefinitiveRankingResponse(res) {
+    return res.ok || [400, 409, 422].includes(res.status);
+}
+
+function getCandidateMediaType(candidate) {
+    if (candidate?.media_type) return String(candidate.media_type).toLowerCase();
+    const path = String(candidate?.path || candidate?.url || '').toLowerCase();
+    return /\.(mp3|wav|ogg|m4a|flac|aac|opus)(\?.*)?$/.test(path) ? 'audio' : 'image';
+}
+
+function getCandidateMediaUrl(candidate) {
+    if (candidate?.url) return candidate.url;
+    if (candidate?.id !== undefined && candidate?.id !== null) {
+        return `/api/media/${encodeURIComponent(candidate.id)}`;
+    }
+    return candidate?.path || '';
 }
 
 function getTaskMediaType(item = currentItem) {
@@ -85,6 +167,17 @@ function updateShortcutsDisplay(mediaType = getTaskMediaType()) {
         return;
     }
 
+    if (isRankingMode()) {
+        const count = getRankingCandidates().length;
+        const numberHint = count === 2 ? '1/2 Winner first' : '1-8 Add to order, Enter Submit, Backspace Remove';
+        shortcuts.innerHTML = `<span class="shortcut-group"><kbd>${numberHint.split(' ')[0]}</kbd> ${escapeHtml(numberHint.slice(numberHint.indexOf(' ') + 1))}</span>` +
+            ' <span class="shortcut-group"><kbd>X</kbd> Invalid set</span>' +
+            (getRankingCandidates().some((candidate) => getCandidateMediaType(candidate) === 'audio') ? ' <span class="shortcut-group"><kbd>R</kbd> Replay</span>' : '') +
+            ' <span class="shortcut-group"><kbd>Z</kbd> Undo</span>' +
+            ' <span class="shortcut-group"><kbd>H</kbd> History</span>';
+        return;
+    }
+
     const groups = STYLES.map((s, i) =>
         `<span class="shortcut-group"><kbd>${i + 1}</kbd> ${capitalize(s)}</span>`
     ).join('');
@@ -108,6 +201,18 @@ async function loadNext() {
 
         if (data.done) {
             showDone(data.progress?.total || 0);
+            return;
+        }
+
+        if (isRankingMode()) {
+            currentRankingSet = data.set || null;
+            currentItem = data;
+            rankingDraft = [];
+            clearPendingRankingRequest();
+            rankingSubmitting = false;
+            rankingFocusedCandidateId = null;
+            updateProgress(data.progress);
+            renderItem(data);
             return;
         }
 
@@ -279,11 +384,48 @@ async function loadReplacement(clusterId) {
 }
 
 async function undoLast() {
+    if (rankingUndoInFlight) return;
+    if (isRankingMode() && rankingDraft.length) {
+        showToast('Finish or clear the draft before persisted undo');
+        return;
+    }
+
+    rankingUndoInFlight = true;
     try {
-        const res = await fetch(`/api/undo?session_id=${encodeURIComponent(sessionId)}`, { method: 'POST' });
+        const target = isRankingMode() ? rankingSubmissionStack.at(-1) : null;
+        if (isRankingMode() && !target) {
+            showToast('Nothing from this browser session to undo');
+            return;
+        }
+        const targetKey = target ? `${target.set_id}:${target.revision}` : null;
+        if (target && pendingRankingUndo?.key !== targetKey) {
+            pendingRankingUndo = { key: targetKey, requestId: generateUUID() };
+        }
+        const undoPayload = target ? {
+            request_id: pendingRankingUndo.requestId,
+            expected_set_id: target.set_id,
+            expected_revision: target.expected_revision,
+            target_revision: target.revision,
+            session_id: sessionId
+        } : null;
+        const res = await fetch(
+            target ? '/api/undo' : `/api/undo?session_id=${encodeURIComponent(sessionId)}`,
+            {
+                method: 'POST',
+                headers: target ? { 'Content-Type': 'application/json' } : {},
+                body: target ? JSON.stringify(undoPayload) : undefined
+            }
+        );
         const data = await res.json();
 
         if (data.success) {
+            if (target) {
+                rankingSubmissionStack.pop();
+                rankingSubmissionStack.forEach((entry) => {
+                    if (entry.set_id === target.set_id) entry.expected_revision = data.revision.revision;
+                });
+                pendingRankingUndo = null;
+            }
             showToast('Undone');
             if (isConfirmationMode()) {
                 const item = data.item || data.returned_item;
@@ -303,6 +445,8 @@ async function undoLast() {
     } catch (err) {
         console.error('Undo failed:', err);
         showToast('Undo failed');
+    } finally {
+        rankingUndoInFlight = false;
     }
 }
 
@@ -314,6 +458,11 @@ function renderItem(data) {
     const main = document.getElementById('main');
     const mediaType = getTaskMediaType(data);
     updateShortcutsDisplay(mediaType);
+
+    if (isRankingMode()) {
+        renderRankingItem(data);
+        return;
+    }
 
     if (isConfirmationMode()) {
         renderConfirmationItem(data);
@@ -397,6 +546,287 @@ function renderItem(data) {
             ${qualityControls}
         </div>
     `;
+}
+
+function getCandidateName(candidate) {
+    const path = String(candidate?.path || '').split(/[\\/]/).pop();
+    return path || `Candidate ${getCandidateDisplayPosition(candidate)}`;
+}
+
+function renderCandidateMetadata(candidate) {
+    if (!candidate?.metadata || typeof candidate.metadata !== 'object') return '';
+    const entries = Object.entries(candidate.metadata);
+    if (!entries.length) return '';
+    return `<dl class="ranking-metadata">${entries.map(([key, value]) => `
+        <div class="ranking-metadata-row"><dt>${escapeHtml(key.replaceAll('_', ' '))}</dt><dd>${escapeHtml(formatMetadataValue(value))}</dd></div>
+    `).join('')}</dl>`;
+}
+
+function renderRankingCandidate(candidate, fallbackPosition) {
+    const displayPosition = getCandidateDisplayPosition(candidate, fallbackPosition);
+    const candidateId = String(getCandidateId(candidate));
+    const mediaType = getCandidateMediaType(candidate);
+    const mediaUrl = escapeHtml(getCandidateMediaUrl(candidate));
+    const name = escapeHtml(getCandidateName(candidate));
+    const isSelected = rankingDraft.includes(candidateId);
+    const media = mediaType === 'audio'
+        ? `<audio id="ranking-audio-${displayPosition}" src="${mediaUrl}" controls preload="metadata" aria-label="Audio for candidate ${displayPosition}"></audio>`
+        : `<img src="${mediaUrl}" alt="${name}" loading="eager" onload="this.style.opacity=1" style="opacity:0;transition:opacity 0.2s">`;
+
+    return `
+        <article class="ranking-candidate ${isSelected ? 'is-selected' : ''}"
+                 data-ranking-candidate data-candidate-id="${escapeHtml(candidateId)}"
+                 data-display-position="${displayPosition}" tabindex="0" role="button"
+                 aria-pressed="${isSelected}" aria-label="Candidate ${displayPosition}, ${name}">
+            <div class="ranking-card-header">
+                <span class="ranking-card-number" aria-hidden="true">${displayPosition}</span>
+                <span class="ranking-card-label">${name}</span>
+                ${isSelected ? '<span class="ranking-selected-mark" aria-label="Added to draft">✓</span>' : ''}
+            </div>
+            <div class="ranking-media ${mediaType === 'audio' ? 'ranking-media-audio' : ''}">${media}</div>
+            ${renderCandidateMetadata(candidate)}
+            <div class="ranking-card-hint">${isSelected ? `Rank ${rankingDraft.indexOf(candidateId) + 1}` : 'Select to add'}</div>
+        </article>
+    `;
+}
+
+function renderRankingDraft() {
+    const candidates = getRankingCandidates();
+    const byId = new Map(candidates.map((candidate) => [String(getCandidateId(candidate)), candidate]));
+    if (!rankingDraft.length) {
+        return '<p class="ranking-draft-empty">No candidates selected yet. Choose cards in best-first order.</p>';
+    }
+
+    return `<ol class="ranking-draft-list" aria-label="Draft ranking">${rankingDraft.map((candidateId, index) => {
+        const candidate = byId.get(String(candidateId));
+        if (!candidate) return '';
+        const displayPosition = getCandidateDisplayPosition(candidate, index + 1);
+        return `<li class="ranking-draft-item" draggable="true" data-draft-candidate-id="${escapeHtml(String(candidateId))}">
+            <span class="ranking-draft-rank">${index + 1}</span>
+            <span class="ranking-draft-name">Card ${displayPosition}: ${escapeHtml(getCandidateName(candidate))}</span>
+            <button type="button" class="btn-secondary ranking-move" data-label-action="true" data-move-draft="up" data-candidate-id="${escapeHtml(String(candidateId))}" aria-label="Move card ${displayPosition} up" ${index === 0 ? 'disabled' : ''}>↑</button>
+            <button type="button" class="btn-secondary ranking-move" data-label-action="true" data-move-draft="down" data-candidate-id="${escapeHtml(String(candidateId))}" aria-label="Move card ${displayPosition} down" ${index === rankingDraft.length - 1 ? 'disabled' : ''}>↓</button>
+        </li>`;
+    }).join('')}</ol>`;
+}
+
+function renderRankingItem(data) {
+    const main = document.getElementById('main');
+    const set = data?.set || currentRankingSet;
+    if (!set || !Array.isArray(set.candidates)) {
+        showError('Ranking set is missing or invalid.');
+        return;
+    }
+
+    currentRankingSet = set;
+    const candidates = getRankingCandidates(set);
+    const criterion = set.criterion || CONFIG?.ranking_criterion || {};
+    const count = candidates.length;
+    const orderHint = count === 2
+        ? 'Choose the winner first. The other card will follow automatically.'
+        : 'Choose every card in strict best-to-worst order.';
+
+    main.innerHTML = `
+        <section class="ranking-shell" aria-labelledby="ranking-prompt">
+            <div class="ranking-header">
+                <div>
+                    <div class="ranking-eyebrow">Ranking set${set.external_id ? ` · ${escapeHtml(set.external_id)}` : ''}</div>
+                    <h2 id="ranking-prompt" class="ranking-prompt">${escapeHtml(criterion.prompt || 'Rank these candidates')}</h2>
+                </div>
+                <div class="ranking-direction" aria-label="Criterion direction">Most preferred first</div>
+            </div>
+            <div class="ranking-criterion-meta">Criterion ${escapeHtml(criterion.id || 'unknown')} · Version ${escapeHtml(criterion.version || 'unknown')}</div>
+            <p class="ranking-instruction">${orderHint} <span class="ranking-key-hint">Card numbers are fixed display positions.</span></p>
+            <div class="ranking-candidates" role="list" aria-label="Ranking candidates">
+                ${candidates.map((candidate, index) => renderRankingCandidate(candidate, index + 1)).join('')}
+            </div>
+            <div class="ranking-draft-panel">
+                <div class="ranking-draft-header">
+                    <h3>Draft order <span class="ranking-draft-count">${rankingDraft.length}/${count}</span></h3>
+                    <span class="ranking-drag-hint">Drag or use arrows to reorder</span>
+                </div>
+                <div id="rankingDraft" class="ranking-draft">${renderRankingDraft()}</div>
+                <div class="ranking-actions">
+                    <button type="button" class="btn btn-ranking-submit" data-ranking-submit data-label-action="true" ${count === 2 || rankingDraft.length !== count ? 'disabled' : ''}>Submit ranking <kbd>Enter</kbd></button>
+                    <button type="button" class="btn btn-ranking-invalid" data-ranking-invalid data-label-action="true">Invalid set <kbd>X</kbd></button>
+                </div>
+            </div>
+        </section>
+    `;
+    bindRankingControls();
+}
+
+function bindRankingControls() {
+    document.querySelectorAll('[data-ranking-candidate]').forEach((card) => {
+        card.addEventListener('focus', () => {
+            rankingFocusedCandidateId = card.dataset.candidateId;
+        });
+        card.addEventListener('click', (event) => {
+            if (event.target.closest('audio, button, a, input, select, textarea')) return;
+            chooseRankingCandidate(card.dataset.candidateId);
+        });
+        card.addEventListener('keydown', (event) => {
+            if (event.target !== card || !['Enter', ' '].includes(event.key)) return;
+            event.preventDefault();
+            chooseRankingCandidate(card.dataset.candidateId);
+        });
+    });
+
+    document.querySelector('[data-ranking-submit]')?.addEventListener('click', () => submitRanking());
+    document.querySelector('[data-ranking-invalid]')?.addEventListener('click', () => submitRanking('invalid', [], 'user_marked_invalid'));
+
+    document.querySelectorAll('[data-move-draft]').forEach((button) => {
+        button.addEventListener('click', () => moveDraftCandidate(button.dataset.candidateId, button.dataset.moveDraft));
+    });
+
+    const draft = document.getElementById('rankingDraft');
+    if (!draft) return;
+    draft.addEventListener('dragstart', (event) => {
+        const item = event.target.closest('[data-draft-candidate-id]');
+        if (!item) return;
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', item.dataset.draftCandidateId);
+        item.classList.add('is-dragging');
+    });
+    draft.addEventListener('dragend', (event) => event.target.closest('[data-draft-candidate-id]')?.classList.remove('is-dragging'));
+    draft.addEventListener('dragover', (event) => {
+        if (event.target.closest('[data-draft-candidate-id]')) event.preventDefault();
+    });
+    draft.addEventListener('drop', (event) => {
+        const target = event.target.closest('[data-draft-candidate-id]');
+        if (!target) return;
+        event.preventDefault();
+        const draggedCandidateId = event.dataTransfer.getData('text/plain');
+        reorderDraftByCandidateId(draggedCandidateId, target.dataset.draftCandidateId);
+    });
+}
+
+function chooseRankingCandidate(candidateId) {
+    if (!isRankingMode() || rankingSubmitting || !currentRankingSet) return;
+    const normalizedId = String(candidateId);
+    const candidates = getRankingCandidates();
+    if (!candidates.some((candidate) => String(getCandidateId(candidate)) === normalizedId)) return;
+
+    if (candidates.length === 2) {
+        rankingDraft = [normalizedId, ...candidates
+            .map((candidate) => String(getCandidateId(candidate)))
+            .filter((id) => id !== normalizedId)];
+        clearPendingRankingRequest();
+        renderRankingItem({ set: currentRankingSet });
+        submitRanking();
+        return;
+    }
+
+    if (rankingDraft.includes(normalizedId)) return;
+    rankingDraft = [...rankingDraft, normalizedId];
+    clearPendingRankingRequest();
+    renderRankingItem({ set: currentRankingSet });
+}
+
+function moveDraftCandidate(candidateId, direction) {
+    const index = rankingDraft.indexOf(String(candidateId));
+    const nextIndex = direction === 'up' ? index - 1 : index + 1;
+    if (index < 0 || nextIndex < 0 || nextIndex >= rankingDraft.length || rankingSubmitting) return;
+    const nextDraft = rankingDraft.slice();
+    [nextDraft[index], nextDraft[nextIndex]] = [nextDraft[nextIndex], nextDraft[index]];
+    rankingDraft = nextDraft;
+    clearPendingRankingRequest();
+    renderRankingItem({ set: currentRankingSet });
+}
+
+function reorderDraftByCandidateId(draggedCandidateId, targetCandidateId) {
+    const dragged = String(draggedCandidateId || '');
+    const target = String(targetCandidateId || '');
+    const fromIndex = rankingDraft.indexOf(dragged);
+    const toIndex = rankingDraft.indexOf(target);
+    if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex || rankingSubmitting) return;
+    const nextDraft = rankingDraft.slice();
+    nextDraft.splice(fromIndex, 1);
+    nextDraft.splice(toIndex, 0, dragged);
+    rankingDraft = nextDraft;
+    clearPendingRankingRequest();
+    renderRankingItem({ set: currentRankingSet });
+}
+
+function isCompleteRanking(candidateIds) {
+    const expected = getRankingCandidates().map((candidate) => String(getCandidateId(candidate)));
+    return candidateIds.length === expected.length && expected.every((id) => candidateIds.includes(id));
+}
+
+async function submitRanking(outcome = 'ranked', orderedCandidateIds = rankingDraft, invalidReason = null) {
+    if (!isRankingMode() || !currentRankingSet || rankingSubmitting || isLabeling) return;
+    const orderedIds = orderedCandidateIds.map((candidateId) => String(candidateId));
+    if (outcome === 'ranked' && !isCompleteRanking(orderedIds)) {
+        showToast('Choose every candidate before submitting');
+        return;
+    }
+
+    rankingSubmitting = true;
+    isLabeling = true;
+    lastSubmitAt = Date.now();
+    setLabelingBusy(true);
+    const setId = getRankingSetId();
+    const expectedRevision = currentRankingSet.revision;
+    const logicalPayload = {
+        set_id: setId,
+        expected_revision: expectedRevision,
+        session_id: sessionId,
+        outcome,
+        ordered_candidate_ids: outcome === 'ranked' ? orderedIds : [],
+        invalid_reason: invalidReason || null
+    };
+
+    try {
+        const payload = {
+            ...logicalPayload,
+            request_id: getRankingRequestId(logicalPayload, 'submit', '/api/rank')
+        };
+
+        const res = await fetch('/api/rank', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (isDefinitiveRankingResponse(res)) clearPendingRankingRequest(logicalPayload, 'submit', '/api/rank');
+
+        if (res.status === 409) {
+            showToast('Set changed elsewhere, loading the next set');
+            await loadNext();
+            return;
+        }
+        if (!res.ok || data.success === false) {
+            showToast(data.message || data.detail || 'Failed to save ranking');
+            return;
+        }
+
+        updateProgress(data.progress);
+        rankingSubmissionStack.push({
+            set_id: setId,
+            expected_revision: data.revision.revision,
+            revision: data.revision.revision
+        });
+        renderRankingReceipt(currentRankingSet, outcome, orderedIds);
+        await loadNext();
+    } catch (err) {
+        console.error('Ranking failed:', err);
+        showToast('Network error saving ranking; retry the same submission');
+    } finally {
+        rankingSubmitting = false;
+        isLabeling = false;
+        setLabelingBusy(false);
+    }
+}
+
+function renderRankingReceipt(set, outcome, orderedIds) {
+    const receipt = document.getElementById('lastDecisionGlobal');
+    if (!receipt) return;
+    if (outcome === 'invalid') {
+        receipt.innerHTML = `Last ranking: <strong>Set ${escapeHtml(getRankingSetId(set))}</strong> marked invalid`;
+        return;
+    }
+    const names = new Map(getRankingCandidates(set).map((candidate) => [String(getCandidateId(candidate)), getCandidateName(candidate)]));
+    receipt.innerHTML = `Last ranking: <strong>${orderedIds.map((id) => escapeHtml(names.get(id) || id)).join(' &rarr; ')}</strong>`;
 }
 
 function renderConfirmationItem(data) {
@@ -489,6 +919,10 @@ function setLabelingBusy(isBusy) {
         button.disabled = isBusy;
         button.classList.toggle('is-busy', isBusy);
     });
+    document.querySelectorAll('.ranking-candidate').forEach((card) => {
+        card.classList.toggle('is-busy', isBusy);
+        card.setAttribute('aria-disabled', String(isBusy));
+    });
 }
 
 function togglePrediction() {
@@ -507,16 +941,80 @@ function togglePrediction() {
 // Statistics Modal
 // ============================================================================
 
+const modalOpeners = new Map();
+
+function getModalFocusableElements(modal) {
+    return Array.from(modal.querySelectorAll(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), audio, [tabindex]:not([tabindex="-1"])'
+    )).filter((element) => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+}
+
+function openModal(modal) {
+    if (!modal) return;
+    if (!modal.classList.contains('active')) {
+        modalOpeners.set(modal.id, document.activeElement);
+    }
+    modal.classList.add('active');
+    const [firstFocusable] = getModalFocusableElements(modal);
+    (firstFocusable || modal).focus();
+}
+
+function closeModalElement(modal) {
+    if (!modal?.classList.contains('active')) return;
+    modal.classList.remove('active');
+    const opener = modalOpeners.get(modal.id);
+    modalOpeners.delete(modal.id);
+    if (opener && opener.isConnected !== false && typeof opener.focus === 'function') {
+        opener.focus();
+    }
+}
+
+function trapModalFocus(event) {
+    if (event.key !== 'Tab') return false;
+    const modal = document.querySelector('.modal.active');
+    if (!modal) return false;
+
+    const focusable = getModalFocusableElements(modal);
+    if (!focusable.length) {
+        event.preventDefault();
+        modal.focus();
+        return true;
+    }
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !modal.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !modal.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+    }
+    return true;
+}
+
 async function showStats() {
     const modal = document.getElementById('statsModal');
     const content = document.getElementById('statsContent');
 
-    modal.classList.add('active');
+    openModal(modal);
     content.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
     try {
         const res = await fetch('/api/stats');
         const stats = await res.json();
+
+        if (isRankingMode()) {
+            content.innerHTML = `
+                <div class="stats-grid">
+                    <div class="stat-item"><div class="stat-label">Sets</div><div class="stat-value">${stats.total_sets}</div></div>
+                    <div class="stat-item"><div class="stat-label">Ranked</div><div class="stat-value">${stats.ranked_sets}</div></div>
+                    <div class="stat-item"><div class="stat-label">Invalid</div><div class="stat-value">${stats.invalid_sets}</div></div>
+                    <div class="stat-item"><div class="stat-label">Remaining</div><div class="stat-value">${stats.remaining_sets}</div></div>
+                    <div class="stat-item"><div class="stat-label">Progress</div><div class="stat-value">${stats.percent}%</div></div>
+                </div>`;
+            return;
+        }
 
         const allLabels = isConfirmationMode()
             ? ['STRONG', 'LOOSE', 'NONE', 'INVALID']
@@ -567,12 +1065,12 @@ async function showStats() {
 }
 
 function closeStats() {
-    document.getElementById('statsModal').classList.remove('active');
+    closeModalElement(document.getElementById('statsModal'));
 }
 
 function closeModal(event) {
     if (event.target.classList.contains('modal')) {
-        event.target.classList.remove('active');
+        closeModalElement(event.target);
     }
 }
 
@@ -586,13 +1084,17 @@ async function showHistory() {
     const modal = document.getElementById('historyModal');
     const filter = document.getElementById('historyFilter');
 
-    const filterValues = isConfirmationMode() ? ['STRONG', 'LOOSE', 'NONE', 'INVALID'] : STYLES.concat(['REFUSE']);
-    filter.innerHTML = `<option value="">All ${isConfirmationMode() ? 'Outcomes' : 'Labels'}</option>` +
-        filterValues.map((s) =>
-            `<option value="${s}">${capitalize(s)}</option>`
-        ).join('');
+    if (isRankingMode()) {
+        filter.innerHTML = '<option value="">All Rankings</option>';
+    } else {
+        const filterValues = isConfirmationMode() ? ['STRONG', 'LOOSE', 'NONE', 'INVALID'] : STYLES.concat(['REFUSE']);
+        filter.innerHTML = `<option value="">All ${isConfirmationMode() ? 'Outcomes' : 'Labels'}</option>` +
+            filterValues.map((s) =>
+                `<option value="${s}">${capitalize(s)}</option>`
+            ).join('');
+    }
 
-    modal.classList.add('active');
+    openModal(modal);
     loadHistory(1);
 }
 
@@ -620,6 +1122,7 @@ async function loadHistory(page = 1) {
                 ${data.items.map((item) => renderHistoryItem(item)).join('')}
             </div>
         `;
+        if (isRankingMode()) bindRankingHistoryControls();
 
         const pagination = document.getElementById('historyPagination');
         const totalPages = Math.ceil(data.total / data.per_page);
@@ -640,6 +1143,8 @@ async function loadHistory(page = 1) {
 }
 
 function renderHistoryItem(item) {
+    if (isRankingMode()) return renderRankingHistoryItem(item);
+
     if (isConfirmationMode()) {
         const indicative = item.indicative_value ?? item.indicative ?? '';
         const outcome = item.confirmation ?? item.outcome ?? item.label ?? '';
@@ -684,6 +1189,212 @@ function renderHistoryItem(item) {
             </div>
         </div>
     `;
+}
+
+function renderRankingHistoryItem(item) {
+    const set = item?.set || item || {};
+    const setId = item?.set_id ?? set.set_id ?? set.id ?? '';
+    const candidates = Array.isArray(item?.candidates) ? item.candidates : (Array.isArray(set.candidates) ? set.candidates : []);
+    const orderedIds = (item?.ordered_candidate_ids || item?.order || item?.ranking || []).map((candidateId) => String(candidateId));
+    const candidateNames = new Map(candidates.map((candidate) => [String(getCandidateId(candidate)), getCandidateName(candidate)]));
+    const visibleOrder = orderedIds.length ? orderedIds : candidates.map((candidate) => String(getCandidateId(candidate)));
+    const orderText = visibleOrder.map((candidateId) => candidateNames.get(candidateId) || candidateId).join(' -> ');
+    const outcome = item?.outcome || (item?.invalid_reason ? 'invalid' : 'ranked');
+    const correctionOrder = outcome === 'ranked' && orderedIds.length ? orderedIds : [];
+    return `<div class="ranking-history-item">
+        <div class="ranking-history-summary">
+            <strong>Set ${escapeHtml(setId)}</strong>
+            <span class="history-outcome">${escapeHtml(outcome)}</span>
+            <div class="ranking-history-order">${escapeHtml(outcome === 'invalid' ? (item.invalid_reason || 'Whole set marked invalid') : orderText || 'No order recorded')}</div>
+            <div class="ranking-history-correction" data-ranking-history-correction
+                 data-set-id="${escapeHtml(String(setId))}"
+                 data-revision="${escapeHtml(String(item?.revision ?? set.revision ?? ''))}"
+                 data-order="${escapeHtml(JSON.stringify(correctionOrder))}">
+                <div>Choose candidates in best-first order:</div>
+                <div class="ranking-history-candidates">
+                    ${candidates.map((candidate, index) => renderRankingHistoryCandidate(candidate, index + 1)).join('')}
+                </div>
+                <div class="ranking-history-correction-order" data-ranking-history-order></div>
+                <div class="ranking-history-correction-actions">
+                    <button type="button" class="btn-secondary" data-ranking-history-save>Save ranking</button>
+                    <button type="button" class="btn-secondary" data-ranking-history-invalid>Mark whole set invalid</button>
+                </div>
+            </div>
+        </div>
+    </div>`;
+}
+
+function renderRankingHistoryCandidate(candidate, fallbackPosition) {
+    const candidateId = String(getCandidateId(candidate));
+    const displayPosition = getCandidateDisplayPosition(candidate, fallbackPosition);
+    const mediaType = getCandidateMediaType(candidate);
+    const mediaUrl = escapeHtml(getCandidateMediaUrl(candidate));
+    const name = escapeHtml(getCandidateName(candidate));
+    const media = mediaType === 'audio'
+        ? `<audio src="${mediaUrl}" controls preload="metadata" aria-label="Audio for candidate ${displayPosition}"></audio>`
+        : `<img src="${mediaUrl}" alt="${name}" loading="lazy">`;
+
+    return `<article class="ranking-candidate" data-ranking-history-candidate
+            data-candidate-id="${escapeHtml(candidateId)}" tabindex="0" role="button"
+            aria-pressed="false" aria-label="Candidate ${displayPosition}, ${name}">
+        <div class="ranking-card-header">
+            <span class="ranking-card-number" aria-hidden="true">${displayPosition}</span>
+            <span class="ranking-card-label">${name}</span>
+        </div>
+        <div class="ranking-media ${mediaType === 'audio' ? 'ranking-media-audio' : ''}">${media}</div>
+        ${renderCandidateMetadata(candidate)}
+        <div class="ranking-card-hint">Select to add</div>
+    </article>`;
+}
+
+function getHistoryCorrectionState(panel) {
+    let state = historyCorrectionStates.get(panel);
+    if (!state) {
+        state = { inFlight: false, payload: null };
+        historyCorrectionStates.set(panel, state);
+    }
+    return state;
+}
+
+function setHistoryCorrectionBusy(panel, isBusy) {
+    const state = getHistoryCorrectionState(panel);
+    const controls = Array.from(panel.querySelectorAll('[data-ranking-history-candidate], [data-ranking-history-save], [data-ranking-history-invalid]'));
+    if (isBusy) {
+        state.disabledControls = new Map(controls.map((control) => [control, control.disabled]));
+    }
+    panel.dataset.correctionInFlight = String(isBusy);
+    controls.forEach((control) => {
+        if ('disabled' in control) {
+            control.disabled = isBusy
+                ? true
+                : state.disabledControls?.get(control) ?? false;
+        }
+        control.setAttribute('aria-disabled', String(isBusy));
+        control.classList.toggle('is-busy', isBusy);
+    });
+}
+
+function bindRankingHistoryControls() {
+    document.querySelectorAll('[data-ranking-history-correction]').forEach((panel) => {
+        let order;
+        try {
+            order = JSON.parse(panel.dataset.order || '[]').map((candidateId) => String(candidateId));
+        } catch (err) {
+            showToast('History ranking is malformed');
+            return;
+        }
+
+        const candidateCards = Array.from(panel.querySelectorAll('[data-ranking-history-candidate]'));
+        const candidateIds = candidateCards.map((card) => card.dataset.candidateId);
+        const candidateNames = new Map(candidateCards.map((card) => [card.dataset.candidateId, card.querySelector('.ranking-card-label')?.textContent || card.textContent]));
+        const state = getHistoryCorrectionState(panel);
+        const update = () => {
+            const knownIds = new Set(candidateIds);
+            order = order.filter((candidateId, index) => knownIds.has(candidateId) && order.indexOf(candidateId) === index);
+            panel.querySelector('[data-ranking-history-order]').textContent = order.length
+                ? order.map((candidateId, index) => `${index + 1}. ${candidateNames.get(candidateId) || candidateId}`).join(' -> ')
+                : 'No candidates selected';
+            candidateCards.forEach((card) => {
+                const selected = order.includes(card.dataset.candidateId);
+                card.setAttribute('aria-pressed', String(selected));
+                card.classList.toggle('is-selected', selected);
+            });
+            const complete = order.length === candidateIds.length && candidateIds.every((candidateId) => order.includes(candidateId));
+            panel.querySelector('[data-ranking-history-save]').disabled = !complete;
+        };
+
+        candidateCards.forEach((card) => {
+            card.addEventListener('click', (event) => {
+                if (state.inFlight) return;
+                if (event.target.closest('audio, a, input, select, textarea')) return;
+                if (state.payload) {
+                    clearPendingRankingRequest(state.payload, 'history-correction', '/api/history/rerank');
+                    state.payload = null;
+                }
+                const candidateId = card.dataset.candidateId;
+                if (order.includes(candidateId)) {
+                    order = order.filter((id) => id !== candidateId);
+                } else {
+                    order = [...order, candidateId];
+                }
+                update();
+            });
+            card.addEventListener('keydown', (event) => {
+                if (event.target.closest('audio, a, input, select, textarea')) return;
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                card.click();
+            });
+        });
+        panel.querySelector('[data-ranking-history-save]').addEventListener('click', () => {
+            if (state.inFlight) return;
+            rerankHistorySet(panel.dataset.setId, panel.dataset.revision, order, 'ranked', null, candidateIds, panel);
+        });
+        panel.querySelector('[data-ranking-history-invalid]').addEventListener('click', () => {
+            if (state.inFlight) return;
+            rerankHistorySet(panel.dataset.setId, panel.dataset.revision, [], 'invalid', 'user_marked_invalid', candidateIds, panel);
+        });
+        update();
+    });
+}
+
+async function rerankHistorySet(setId, revision, orderedCandidateIds, outcome = 'ranked', invalidReason = null, knownCandidateIds = [], panel = null) {
+    const orderedIds = orderedCandidateIds.map((candidateId) => String(candidateId));
+    if (outcome === 'ranked' && (orderedIds.length !== knownCandidateIds.length || new Set(orderedIds).size !== orderedIds.length || !knownCandidateIds.every((candidateId) => orderedIds.includes(candidateId)))) {
+        showToast('Choose every candidate exactly once');
+        return;
+    }
+
+    const logicalPayload = {
+        set_id: String(setId),
+        expected_revision: Number(revision),
+        session_id: sessionId,
+        outcome,
+        ordered_candidate_ids: outcome === 'ranked' ? orderedIds : [],
+        invalid_reason: invalidReason || null
+    };
+    const state = panel ? getHistoryCorrectionState(panel) : null;
+    if (state?.inFlight) return;
+    if (state) {
+        state.inFlight = true;
+        state.payload = logicalPayload;
+        setHistoryCorrectionBusy(panel, true);
+    }
+
+    try {
+        const res = await fetch('/api/history/rerank', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                ...logicalPayload,
+                request_id: getRankingRequestId(logicalPayload, 'history-correction', '/api/history/rerank')
+            })
+        });
+        const data = await res.json();
+        if (isDefinitiveRankingResponse(res)) {
+            clearPendingRankingRequest(logicalPayload, 'history-correction', '/api/history/rerank');
+            if (state) state.payload = null;
+        }
+        if (!res.ok || data.success === false) {
+            showToast(data.message || data.detail || 'Failed to update ranking');
+            return;
+        }
+        rankingSubmissionStack.push({
+            set_id: data.revision.set_id,
+            expected_revision: data.revision.revision,
+            revision: data.revision.revision
+        });
+        showToast('Ranking revision saved');
+        loadHistory(currentHistoryPage);
+    } catch (err) {
+        console.error('Ranking history correction failed:', err);
+        showToast('Network error updating ranking; retry the same correction');
+    } finally {
+        if (state) {
+            state.inFlight = false;
+            setHistoryCorrectionBusy(panel, false);
+        }
+    }
 }
 
 async function confirmHistory(imageId, confirmation) {
@@ -742,7 +1453,7 @@ async function relabelFromHistory(imageId) {
 }
 
 function closeHistory() {
-    document.getElementById('historyModal').classList.remove('active');
+    closeModalElement(document.getElementById('historyModal'));
 }
 
 // ============================================================================
@@ -783,8 +1494,14 @@ function escapeHtml(value) {
 }
 
 function replayCurrentAudio() {
-    if (getTaskMediaType() !== 'audio') return;
-    const audio = document.getElementById('currentAudio');
+    const focusedAudio = document.activeElement?.tagName === 'AUDIO' ? document.activeElement : null;
+    const focusedCandidateAudio = rankingFocusedCandidateId
+        ? Array.from(document.querySelectorAll('[data-ranking-candidate]'))
+            .find((card) => card.dataset.candidateId === rankingFocusedCandidateId)?.querySelector('audio')
+        : null;
+    const audio = isRankingMode()
+        ? (focusedAudio || focusedCandidateAudio || document.querySelector('.ranking-candidates audio'))
+        : document.getElementById('currentAudio');
     if (!audio) return;
     audio.currentTime = 0;
     audio.play().catch(() => {});
@@ -797,14 +1514,72 @@ function replayHistoryAudio(itemId) {
     audio.play().catch(() => {});
 }
 
+function isShortcutSuppressed(event) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest('input, textarea, select, button, a, audio, [contenteditable="true"]')) return true;
+    return Boolean(document.querySelector('.modal.active'));
+}
+
 // ============================================================================
 // Keyboard Shortcuts
 // ============================================================================
 
 document.addEventListener('keydown', (e) => {
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-
     const key = e.key.toLowerCase();
+
+    if (key === 'escape') {
+        closeModalElement(document.querySelector('.modal.active'));
+        return;
+    }
+    if (trapModalFocus(e)) return;
+    if (isShortcutSuppressed(e)) return;
+
+    if (isRankingMode()) {
+        if (key === 'z') {
+            e.preventDefault();
+            if (rankingDraft.length) {
+                showToast('Finish or clear the draft before persisted undo');
+            } else {
+                undoLast();
+            }
+            return;
+        }
+        if (key === 'h') {
+            e.preventDefault();
+            showHistory();
+            return;
+        }
+        if (key === 'r') {
+            e.preventDefault();
+            replayCurrentAudio();
+            return;
+        }
+        if (key === 'x') {
+            e.preventDefault();
+            submitRanking('invalid', [], 'user_marked_invalid');
+            return;
+        }
+        if (key === 'backspace') {
+            e.preventDefault();
+            if (rankingDraft.length && !rankingSubmitting) {
+                rankingDraft = rankingDraft.slice(0, -1);
+                clearPendingRankingRequest();
+                renderRankingItem({ set: currentRankingSet });
+            }
+            return;
+        }
+        if (key === 'enter') {
+            e.preventDefault();
+            submitRanking();
+            return;
+        }
+        if (/^[1-8]$/.test(key)) {
+            e.preventDefault();
+            const candidate = getRankingCandidates().find((entry, index) => getCandidateDisplayPosition(entry, index + 1) === Number(key));
+            if (candidate) chooseRankingCandidate(getCandidateId(candidate));
+        }
+        return;
+    }
 
     if (isConfirmationMode() && key === ' ') {
         e.preventDefault();
@@ -820,12 +1595,6 @@ document.addEventListener('keydown', (e) => {
     if (key === 'h') {
         e.preventDefault();
         showHistory();
-        return;
-    }
-
-    if (key === 'escape') {
-        closeStats();
-        closeHistory();
         return;
     }
 

@@ -55,6 +55,48 @@ class TestLabelConfig:
         with pytest.raises(ValueError):
             LabelConfig(mode="ontology_confirmation")
 
+    def test_ranking_config_requires_versioned_most_criterion(self):
+        valid_criterion = {
+            "id": "sentiment",
+            "version": "v1",
+            "prompt": "Which clip is most positive?",
+            "direction": "most",
+        }
+        config = LabelConfig(
+            mode="ranking",
+            labels=[],
+            ranking_criterion=valid_criterion,
+        )
+        assert config.to_dict()["ranking_criterion"]["id"] == "sentiment"
+
+        with pytest.raises(ValueError, match="exactly"):
+            LabelConfig(
+                mode="ranking",
+                labels=[],
+                ranking_criterion={**valid_criterion, "unexpected": True},
+            )
+        with pytest.raises(ValueError, match="exactly"):
+            LabelConfig(
+                mode="ranking",
+                labels=[],
+                ranking_criterion={key: value for key, value in valid_criterion.items()
+                                   if key != "direction"},
+            )
+
+        with pytest.raises(ValueError, match="ranking_criterion"):
+            LabelConfig(mode="ranking", labels=[])
+        with pytest.raises(ValueError, match="direction"):
+            LabelConfig(
+                mode="ranking",
+                labels=[],
+                ranking_criterion={
+                    "id": "sentiment",
+                    "version": "v1",
+                    "prompt": "Which clip is least positive?",
+                    "direction": "least",
+                },
+            )
+
     @pytest.mark.parametrize("legacy", ["123", "true", "null", "[1,2]"])
     def test_legacy_metadata_that_looks_like_json_stays_text(self, legacy):
         assert decode_metadata_value(legacy) == legacy
