@@ -131,6 +131,10 @@ class LabelConfig:
             criterion = self.ranking_criterion
             if not isinstance(criterion, dict):
                 raise ValueError("Ranking mode requires ranking_criterion")
+            if set(criterion) != {"id", "version", "prompt", "direction"}:
+                raise ValueError(
+                    "Ranking criterion must contain exactly id, version, prompt, and direction"
+                )
             required = ("id", "version", "prompt")
             if any(not isinstance(criterion.get(key), str) or not criterion[key].strip() for key in required):
                 raise ValueError("Ranking criterion requires non-empty id, version, and prompt")

@@ -13,10 +13,12 @@ from ranking_store import (
     build_ranking_export,
     create_task,
     get_history,
+    get_latest_completed_sets,
     get_next_set,
     get_set,
     get_stats,
     initialize_ranking_store,
+    initialize_schema,
     submit_revision,
     undo_last_for_session,
 )
@@ -162,6 +164,50 @@ def test_display_positions_are_persisted_and_distinct_from_source_and_rank(db):
     positions = {c["candidate_id"]: c["rank_position"] for c in ranked["candidates"]}
     assert positions == {"a-2": 1, "a-1": 2}
     assert [c["display_position"] for c in ranked["candidates"]] == [c["display_position"] for c in before["candidates"]]
+
+
+def test_current_schema_read_does_not_take_write_lock(db):
+    holder = sqlite3.connect(db)
+    reader = sqlite3.connect(db, timeout=0)
+    try:
+        holder.execute("BEGIN IMMEDIATE")
+        assert get_set(reader, "set-a")["set_id"] == "set-a"
+    finally:
+        reader.close()
+        holder.rollback()
+        holder.close()
+
+
+def test_omitted_source_positions_are_one_based(tmp_path):
+    db = tmp_path / "one-based.sqlite"
+    initialize_ranking_store(
+        db,
+        CRITERION,
+        [
+            {
+                "set_id": "first",
+                "candidates": [
+                    {"candidate_id": "first-a", "path": "/first-a"},
+                    {"candidate_id": "first-b", "path": "/first-b"},
+                ],
+            },
+            {
+                "set_id": "second",
+                "candidates": [
+                    {"candidate_id": "second-a", "path": "/second-a"},
+                    {"candidate_id": "second-b", "path": "/second-b"},
+                ],
+            },
+        ],
+        random_seed=2,
+    )
+
+    assert {get_set(db, set_id)["source_position"] for set_id in ("first", "second")} == {1, 2}
+    assert {
+        candidate["source_position"]
+        for set_id in ("first", "second")
+        for candidate in get_set(db, set_id)["candidates"]
+    } == {1, 2}
 
 
 def test_next_set_uses_persisted_display_order_and_ends_after_completion(db):
@@ -366,8 +412,9 @@ def test_non_empty_adjacent_ingest_schema_migration_preserves_revisions(tmp_path
             FROM ranking_revisions
             """
         ).fetchone()
+    canonical_timestamp = "2026-07-18T01:02:03+00:00"
     assert revision == (
-        "legacy-set", 1, "legacy-request", legacy_timestamp, legacy_ranking_json
+        "legacy-set", 1, "legacy-request", canonical_timestamp, legacy_ranking_json
     )
     assert get_set(database, "legacy-set")["current"] == {
         "revision": 1,
@@ -376,8 +423,86 @@ def test_non_empty_adjacent_ingest_schema_migration_preserves_revisions(tmp_path
         "invalid_reason": None,
         "session_id": "legacy",
         "request_id": "legacy-request",
-        "timestamp": legacy_timestamp,
+        "timestamp": canonical_timestamp,
     }
+
+
+def test_migrated_legacy_timestamps_keep_history_and_undo_chronology(tmp_path):
+    jsonl = tmp_path / "mixed-legacy.jsonl"
+    records = [
+        {
+            "set_id": "older",
+            "criterion": CRITERION,
+            "candidates": [
+                {"candidate_id": "older-a", "path": "older-a.jpg"},
+                {"candidate_id": "older-b", "path": "older-b.jpg"},
+            ],
+        },
+        {
+            "set_id": "newer",
+            "criterion": CRITERION,
+            "candidates": [
+                {"candidate_id": "newer-a", "path": "newer-a.jpg"},
+                {"candidate_id": "newer-b", "path": "newer-b.jpg"},
+            ],
+        },
+    ]
+    jsonl.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    database = tmp_path / "mixed-legacy.sqlite"
+    ingest_ranking(jsonl, database, shuffle=False, absolute_paths=False)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            INSERT INTO ranking_revisions
+                (set_id, revision, request_id, expected_revision, ranking_json,
+                 is_invalid, invalid_reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("older", 1, "older-request", 0, json.dumps(["older-a", "older-b"]), 0, None,
+             "2026-07-18 01:02:03"),
+        )
+        connection.execute(
+            """
+            INSERT INTO ranking_revisions
+                (set_id, revision, request_id, expected_revision, ranking_json,
+                 is_invalid, invalid_reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("newer", 1, "newer-request", 0, json.dumps(["newer-a", "newer-b"]), 0, None,
+             "2026-07-18T04:02:03+02:00"),
+        )
+
+    initialize_schema(database)
+    with sqlite3.connect(database) as connection:
+        timestamps = connection.execute(
+            "SELECT set_id, timestamp FROM ranking_revisions ORDER BY timestamp DESC"
+        ).fetchall()
+    assert timestamps == [
+        ("newer", "2026-07-18T02:02:03+00:00"),
+        ("older", "2026-07-18T01:02:03+00:00"),
+    ]
+    assert [item["set_id"] for item in get_history(database, session_id="legacy")] == [
+        "newer", "older"
+    ]
+    assert undo_last_for_session(database, "legacy")["set_id"] == "newer"
+
+
+def test_latest_completed_sets_is_paginated_and_bulk_hydrated(db):
+    submit_revision(db, request("set-a", "history-a", 0, "history", ordered=["a-2", "a-1"]))
+    submit_revision(db, request("set-b", "history-b", 0, "history", outcome="invalid", invalid_reason="unclear"))
+
+    newest = get_latest_completed_sets(db, limit=1)
+    remaining = get_latest_completed_sets(db, limit=1, offset=1)
+    assert newest["total"] == 2
+    assert remaining["total"] == 2
+    assert [item["set_id"] for item in newest["items"] + remaining["items"]] == ["set-b", "set-a"]
+
+    expected = []
+    for revision in get_history(db):
+        if revision["set_id"] not in {item["set_id"] for item in expected}:
+            expected.append({**get_set(db, revision["set_id"]), **revision})
+    assert newest["items"][0] == expected[0]
+    assert remaining["items"][0] == expected[1]
 
 
 def test_repeated_undo_skips_prior_undo_revision_and_reaches_pending(db):

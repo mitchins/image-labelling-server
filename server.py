@@ -31,7 +31,7 @@ from media_utils import guess_media_type_from_path, guess_mime_type
 from ranking_store import (
     RankingStoreError,
     build_ranking_export,
-    get_history as get_ranking_history,
+    get_latest_completed_sets as get_latest_ranking_sets,
     get_next_set as get_next_ranking_set,
     get_set as get_ranking_set,
     get_stats as get_ranking_stats,
@@ -127,6 +127,16 @@ def load_config_from_db(db_path: str):
             except json.JSONDecodeError:
                 settings[row["key"]] = row["value"]
 
+    if _table_exists(cur, "ranking_tasks"):
+        task_row = cur.execute(
+            "SELECT mode, criterion_json, task_settings_json FROM ranking_tasks WHERE task_id = 1"
+        ).fetchone()
+        if task_row:
+            task_settings = json.loads(task_row["task_settings_json"])
+            settings = {**task_settings, **settings}
+            settings["mode"] = task_row["mode"]
+            settings["ranking_criterion"] = json.loads(task_row["criterion_json"])
+
     label_rows = []
     if _table_exists(cur, "labels"):
         cur.execute(
@@ -166,9 +176,11 @@ def load_config_from_db(db_path: str):
     )
 
 
-def get_database_ranking_criterion(db_path: str) -> dict:
+def get_database_ranking_criterion(db_path) -> dict:
     """Read the immutable criterion attached to a ranking database."""
-    with sqlite3.connect(db_path) as conn:
+    owns_connection = not isinstance(db_path, sqlite3.Connection)
+    conn = sqlite3.connect(db_path) if owns_connection else db_path
+    try:
         has_task = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ranking_tasks'"
         ).fetchone()
@@ -178,9 +190,25 @@ def get_database_ranking_criterion(db_path: str) -> dict:
             ).fetchone()
         else:
             row = conn.execute("SELECT criterion_json FROM ranking_sets LIMIT 1").fetchone()
+    finally:
+        if owns_connection:
+            conn.close()
     if row is None:
         raise ValueError("Ranking database has no task criterion")
     return json.loads(row[0])
+
+
+def public_ranking_set(ranking_set: dict) -> dict:
+    """Attach opaque media URLs and remove private filesystem locations."""
+    from urllib.parse import urlencode
+
+    for candidate in ranking_set.get("candidates", []):
+        candidate["url"] = "/api/ranking/media?" + urlencode({
+            "set_id": ranking_set["set_id"],
+            "candidate_id": candidate["candidate_id"],
+        })
+        candidate.pop("path", None)
+    return ranking_set
 
 
 def validate_ranking_criterion(db_path: str, config) -> dict:
@@ -363,11 +391,7 @@ async def get_next_image(session_id: str = Query(default=None)):
         if ranking_set is None:
             return {"done": True, "message": "All sets ranked!", "progress": progress}
         ranking_set["criterion"] = get_database_ranking_criterion(DB_PATH)
-        for candidate in ranking_set["candidates"]:
-            from urllib.parse import urlencode
-            candidate["url"] = "/api/ranking/media?" + urlencode({
-                "set_id": ranking_set["set_id"], "candidate_id": candidate["candidate_id"]
-            })
+        public_ranking_set(ranking_set)
         return {"done": False, "set": ranking_set, "progress": progress}
     with get_db() as conn:
         cur = conn.cursor()
@@ -639,7 +663,7 @@ async def get_ranking_media(set_id: str, candidate_id: str):
         raise HTTPException(status_code=404, detail="Candidate not found")
     path = Path(candidate["path"])
     if not path.exists():
-        raise HTTPException(status_code=404, detail=f"Media file not found: {path}")
+        raise HTTPException(status_code=404, detail="Media file not found")
     media_type = candidate.get("media_type") or guess_media_type_from_path(path)
     return FileResponse(path, media_type=guess_mime_type(path, media_type))
 
@@ -656,7 +680,7 @@ def _get_media_response(image_id: int, expected_media_type: Optional[str] = None
         
         path = Path(row["path"])
         if not path.exists():
-            raise HTTPException(status_code=404, detail=f"Media file not found: {path}")
+            raise HTTPException(status_code=404, detail="Media file not found")
 
         media_type = row["media_type"] if "media_type" in row.keys() else guess_media_type_from_path(path)
         if expected_media_type and media_type != expected_media_type:
@@ -713,27 +737,13 @@ async def get_history(
     """Get labeling history for review, newest first."""
     if is_ranking_mode():
         try:
-            revisions = get_ranking_history(DB_PATH)
-            latest = {}
-            for revision in revisions:
-                latest.setdefault(revision["set_id"], revision)
-            items = []
-            for set_id, revision in latest.items():
-                if revision["outcome"] == "pending":
-                    continue
-                ranking_set = get_ranking_set(DB_PATH, set_id)
-                from urllib.parse import urlencode
-                for candidate in ranking_set["candidates"]:
-                    candidate["url"] = "/api/ranking/media?" + urlencode({
-                        "set_id": set_id,
-                        "candidate_id": candidate["candidate_id"],
-                    })
-                items.append({**ranking_set, **revision})
+            result = get_latest_ranking_sets(
+                DB_PATH, limit=per_page, offset=(page - 1) * per_page
+            )
+            items = [public_ranking_set(item) for item in result["items"]]
         except RankingStoreError as exc:
             ranking_error(exc)
-        total = len(items)
-        offset = (page - 1) * per_page
-        return {"items": items[offset:offset + per_page], "total": total,
+        return {"items": items, "total": result["total"],
                 "page": page, "per_page": per_page}
     with get_db() as conn:
         cur = conn.cursor()
@@ -882,7 +892,7 @@ async def get_garbage_rating(image_id: int):
         if media_type != "image":
             raise HTTPException(status_code=400, detail="Garbage rating is only available for image tasks")
         if not path.exists():
-            raise HTTPException(status_code=404, detail=f"Image file not found: {path}")
+            raise HTTPException(status_code=404, detail="Image file not found")
     
     try:
         # Lazy import torch dependencies
@@ -959,11 +969,7 @@ async def undo_last(
             progress = get_ranking_stats(DB_PATH)
             ranking_set = get_ranking_set(DB_PATH, revision["set_id"])
             ranking_set["criterion"] = get_database_ranking_criterion(DB_PATH)
-            for candidate in ranking_set["candidates"]:
-                from urllib.parse import urlencode
-                candidate["url"] = "/api/ranking/media?" + urlencode({
-                    "set_id": ranking_set["set_id"], "candidate_id": candidate["candidate_id"]
-                })
+            public_ranking_set(ranking_set)
         except RankingStoreError as exc:
             if getattr(exc, "status_code", None) == 404:
                 return {"success": False, "message": str(exc)}

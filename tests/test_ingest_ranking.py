@@ -3,6 +3,7 @@ import sqlite3
 
 import pytest
 
+import ingest_ranking as ingest_module
 from ingest_ranking import RankingIngestError, ingest_ranking, main
 
 
@@ -82,6 +83,21 @@ def test_criterion_mismatch_rejects(tmp_path):
         ingest_ranking(jsonl, tmp_path / "ranking.db")
 
 
+@pytest.mark.parametrize(
+    "criterion_value",
+    [
+        {**criterion(), "unexpected": True},
+        {key: value for key, value in criterion().items() if key != "direction"},
+    ],
+)
+def test_criterion_requires_exact_keys(tmp_path, criterion_value):
+    jsonl = tmp_path / "sets.jsonl"
+    write_jsonl(jsonl, [ranking_set(criterion_value=criterion_value)])
+
+    with pytest.raises(RankingIngestError, match="exactly id, version, prompt, and direction"):
+        ingest_ranking(jsonl, tmp_path / "ranking.db")
+
+
 def test_repeated_media_across_sets_and_typed_metadata_persist(tmp_path):
     first = ranking_set(metadata={"count": 2, "flag": True, "nested": {"ok": None}})
     second = ranking_set("s2")
@@ -133,6 +149,18 @@ def test_base_dir_seed_and_config_are_persisted(tmp_path):
     assert json.loads(config.read_text())["ranking_criterion"] == criterion()
 
 
+def test_no_absolute_paths_preserves_relative_base_dir(tmp_path):
+    jsonl = tmp_path / "sets.jsonl"
+    write_jsonl(jsonl, [ranking_set()])
+    db = tmp_path / "ranking.db"
+
+    ingest_ranking(jsonl, db, base_dir="media", shuffle=False, absolute_paths=False)
+
+    with sqlite3.connect(db) as conn:
+        path = conn.execute("SELECT path FROM ranking_candidates LIMIT 1").fetchone()[0]
+    assert path == "media/clip-0.wav"
+
+
 def test_seed_repeats_display_order_and_no_shuffle_is_identity(tmp_path):
     jsonl = tmp_path / "sets.jsonl"
     write_jsonl(jsonl, [ranking_set(candidate_count=6)])
@@ -169,6 +197,35 @@ def test_invalid_input_does_not_damage_existing_database(tmp_path):
     assert db.read_bytes() == before
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM ranking_sets").fetchone()[0] == 1
+
+
+def test_database_and_config_rollback_when_second_replacement_fails(tmp_path, monkeypatch):
+    jsonl = tmp_path / "sets.jsonl"
+    db = tmp_path / "ranking.db"
+    config_path = tmp_path / "ranking.json"
+    write_jsonl(jsonl, [ranking_set()])
+    ingest_ranking(jsonl, db, config_path=config_path, shuffle=False)
+    old_db = db.read_bytes()
+    old_config = config_path.read_bytes()
+
+    write_jsonl(jsonl, [ranking_set("replacement")])
+    original_replace = ingest_module.os.replace
+    replacement_count = 0
+
+    def fail_second_replacement(source, destination):
+        nonlocal replacement_count
+        replacement_count += 1
+        if replacement_count == 2:
+            raise OSError("simulated config replacement failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(ingest_module.os, "replace", fail_second_replacement)
+    with pytest.raises(OSError, match="simulated config replacement failure"):
+        ingest_ranking(jsonl, db, config_path=config_path, shuffle=False)
+
+    assert replacement_count == 2
+    assert db.read_bytes() == old_db
+    assert config_path.read_bytes() == old_config
 
 
 def test_cli_reports_validation_errors_as_system_exit(tmp_path):

@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import random
+import shutil
 import sqlite3
 import tempfile
 from collections.abc import Iterable
@@ -157,7 +158,9 @@ def load_ranking_jsonl(
     path = Path(jsonl_path)
     if not path.exists():
         raise FileNotFoundError(f"JSONL file not found: {path}")
-    resolved_base = Path(base_dir).resolve() if base_dir is not None else None
+    resolved_base = None
+    if base_dir is not None:
+        resolved_base = Path(base_dir).resolve() if absolute_paths else Path(base_dir)
     sets = []
     set_ids = set()
     criterion = None
@@ -272,7 +275,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def _write_database(
+def _stage_database(
     db_path: Path,
     sets: list[dict],
     *,
@@ -281,9 +284,10 @@ def _write_database(
     shuffle: bool,
     seed: Optional[int],
     absolute_paths: bool,
-) -> None:
+) -> Path:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = None
+    keep_temp = False
     try:
         with tempfile.NamedTemporaryFile(
             prefix=f".{db_path.name}.", suffix=".tmp", dir=db_path.parent, delete=False
@@ -349,25 +353,51 @@ def _write_database(
                 [(key, _json_text(value, f"setting {key}")) for key, value in settings.items()],
             )
             conn.commit()
-        os.replace(temp_path, db_path)
-        temp_path = None
+        keep_temp = True
+        return temp_path
     finally:
-        if temp_path is not None:
+        if not keep_temp and temp_path is not None:
             try:
                 temp_path.unlink()
             except FileNotFoundError:
                 pass
 
 
-def write_ranking_config(
+def _write_database(
+    db_path: Path,
+    sets: list[dict],
+    *,
+    name: str,
+    description: str,
+    shuffle: bool,
+    seed: Optional[int],
+    absolute_paths: bool,
+) -> None:
+    temporary = _stage_database(
+        db_path,
+        sets,
+        name=name,
+        description=description,
+        shuffle=shuffle,
+        seed=seed,
+        absolute_paths=absolute_paths,
+    )
+    try:
+        os.replace(temporary, db_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _stage_config(
     config_path: Union[Path, str],
     *,
     name: str,
     description: str,
     db_path: Union[Path, str],
     criterion: dict,
-) -> None:
-    """Write a future-compatible ranking LabelConfig JSON atomically."""
+) -> Path:
+    """Build a future-compatible ranking LabelConfig JSON in a temporary file."""
     destination = Path(config_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -384,6 +414,7 @@ def write_ranking_config(
         "metadata_fields": [],
     }
     temporary = None
+    keep_temp = False
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -396,14 +427,117 @@ def write_ranking_config(
             temporary = Path(stream.name)
             json.dump(payload, stream, indent=2, ensure_ascii=False)
             stream.write("\n")
-        os.replace(temporary, destination)
-        temporary = None
+        keep_temp = True
+        return temporary
     finally:
-        if temporary is not None:
+        if not keep_temp and temporary is not None:
             try:
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+
+
+def _write_database_and_config(
+    db_path: Path,
+    config_path: Path,
+    sets: list[dict],
+    *,
+    name: str,
+    description: str,
+    shuffle: bool,
+    seed: Optional[int],
+    absolute_paths: bool,
+) -> None:
+    """Replace the database and config together, restoring both on failure."""
+    if db_path == config_path:
+        raise ValueError("Database and config paths must be different")
+
+    staged = []
+    try:
+        staged_db = _stage_database(
+            db_path,
+            sets,
+            name=name,
+            description=description,
+            shuffle=shuffle,
+            seed=seed,
+            absolute_paths=absolute_paths,
+        )
+        staged.append((staged_db, db_path))
+        staged_config = _stage_config(
+            config_path,
+            name=name,
+            description=description,
+            db_path=db_path,
+            criterion=sets[0]["criterion"],
+        )
+        staged.append((staged_config, config_path))
+        _commit_replacements(staged)
+    finally:
+        for temporary, _destination in staged:
+            if temporary.exists():
+                temporary.unlink()
+
+
+def _commit_replacements(staged: list[tuple[Path, Path]]) -> None:
+    """Replace staged files and restore old destinations if a replacement fails."""
+    backups = []
+    replaced = []
+    try:
+        for temporary, destination in staged:
+            backup = None
+            if destination.exists():
+                with tempfile.NamedTemporaryFile(
+                    prefix=f".{destination.name}.",
+                    suffix=".backup",
+                    dir=destination.parent,
+                    delete=False,
+                ) as stream:
+                    backup = Path(stream.name)
+                shutil.copy2(destination, backup)
+            backups.append((temporary, destination, backup))
+            os.replace(temporary, destination)
+            replaced.append((destination, backup))
+    except BaseException:
+        for destination, backup in reversed(replaced):
+            if backup is None:
+                try:
+                    destination.unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                shutil.copy2(backup, destination)
+        raise
+    finally:
+        for temporary, _destination, backup in backups:
+            if temporary.exists():
+                temporary.unlink()
+            if backup is not None and backup.exists():
+                backup.unlink()
+
+
+def write_ranking_config(
+    config_path: Union[Path, str],
+    *,
+    name: str,
+    description: str,
+    db_path: Union[Path, str],
+    criterion: dict,
+) -> None:
+    """Write a future-compatible ranking LabelConfig JSON atomically."""
+    destination = Path(config_path)
+    temporary = _stage_config(
+        destination,
+        name=name,
+        description=description,
+        db_path=db_path,
+        criterion=criterion,
+    )
+    try:
+        os.replace(temporary, destination)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def ingest_ranking(
@@ -425,22 +559,27 @@ def ingest_ranking(
         absolute_paths=absolute_paths,
     )
     _assign_display_positions(sets, shuffle=shuffle, seed=seed)
-    _write_database(
-        Path(db_path),
-        sets,
-        name=name,
-        description=description,
-        shuffle=shuffle,
-        seed=seed,
-        absolute_paths=absolute_paths,
-    )
-    if config_path is not None:
-        write_ranking_config(
-            config_path,
+    destination = Path(db_path)
+    if config_path is None:
+        _write_database(
+            destination,
+            sets,
             name=name,
             description=description,
-            db_path=db_path,
-            criterion=sets[0]["criterion"],
+            shuffle=shuffle,
+            seed=seed,
+            absolute_paths=absolute_paths,
+        )
+    else:
+        _write_database_and_config(
+            destination,
+            Path(config_path),
+            sets,
+            name=name,
+            description=description,
+            shuffle=shuffle,
+            seed=seed,
+            absolute_paths=absolute_paths,
         )
     return sets
 

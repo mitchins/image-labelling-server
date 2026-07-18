@@ -1,10 +1,12 @@
 import json
+import sqlite3
 
 import pytest
 from fastapi.testclient import TestClient
 
 from config import LabelConfig
 from ingest_ranking import ingest_ranking
+from ranking_store import initialize_ranking_store
 
 
 @pytest.fixture
@@ -77,6 +79,7 @@ def test_ranking_next_media_submit_idempotency_stats_and_export(ranking_client):
     ranking_set = response.json()["set"]
     assert ranking_set["criterion"]["direction"] == "most"
     assert [item["display_position"] for item in ranking_set["candidates"]] == [1, 2]
+    assert all("path" not in item for item in ranking_set["candidates"])
 
     media = client.get(ranking_set["candidates"][0]["url"])
     assert media.status_code == 200
@@ -115,6 +118,10 @@ def test_ranking_criterion_must_match_database(ranking_client):
     with pytest.raises(ValueError, match="does not match"):
         server_module.validate_ranking_criterion(str(db), matching)
 
+    with sqlite3.connect(db) as connection:
+        assert server_module.get_database_ranking_criterion(connection)["id"] == "sentiment"
+        assert connection.execute("SELECT 1").fetchone()[0] == 1
+
 
 def test_ranking_history_correction_and_exact_undo(ranking_client):
     client, _ = ranking_client
@@ -124,6 +131,7 @@ def test_ranking_history_correction_and_exact_undo(ranking_client):
     history = client.get("/api/history?page=1&per_page=12").json()
     assert history["total"] == 1
     item = history["items"][0]
+    assert all("path" not in candidate for candidate in item["candidates"])
     assert item["candidates"][0]["url"].startswith("/api/ranking/media?")
     assert client.get(item["candidates"][0]["url"]).status_code == 200
     reversed_order = list(reversed(item["ordered_candidate_ids"]))
@@ -151,8 +159,38 @@ def test_ranking_history_correction_and_exact_undo(ranking_client):
     retry = client.post("/api/undo", json=undo_payload)
     assert retry.status_code == 200
     assert retry.json()["revision"] == undone.json()["revision"]
+    assert all("path" not in candidate for candidate in undone.json()["set"]["candidates"])
     current = client.get("/api/export").json()["sets"][0]["current"]
     assert current["ordered_candidate_ids"] == item["ordered_candidate_ids"]
+
+
+def test_native_ranking_store_loads_config_without_settings_table(tmp_path):
+    db = tmp_path / "native.db"
+    criterion = {
+        "id": "sentiment",
+        "version": "v2",
+        "prompt": "Which is most positive?",
+        "direction": "most",
+    }
+    initialize_ranking_store(
+        db,
+        criterion,
+        [{
+            "set_id": "native-set",
+            "candidates": [
+                {"candidate_id": "a", "path": "a.wav", "media_type": "audio"},
+                {"candidate_id": "b", "path": "b.wav", "media_type": "audio"},
+            ],
+        }],
+        task_settings={"name": "Native ranking", "media_type": "audio"},
+    )
+
+    import server as server_module
+    config = server_module.load_config_from_db(str(db))
+    assert config.mode == "ranking"
+    assert config.name == "Native ranking"
+    assert config.media_type == "audio"
+    assert config.ranking_criterion == criterion
 
 
 def test_ranking_rejects_partial_foreign_stale_and_mixed_invalid(ranking_client):

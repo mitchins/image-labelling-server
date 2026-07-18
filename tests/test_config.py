@@ -56,17 +56,32 @@ class TestLabelConfig:
             LabelConfig(mode="ontology_confirmation")
 
     def test_ranking_config_requires_versioned_most_criterion(self):
+        valid_criterion = {
+            "id": "sentiment",
+            "version": "v1",
+            "prompt": "Which clip is most positive?",
+            "direction": "most",
+        }
         config = LabelConfig(
             mode="ranking",
             labels=[],
-            ranking_criterion={
-                "id": "sentiment",
-                "version": "v1",
-                "prompt": "Which clip is most positive?",
-                "direction": "most",
-            },
+            ranking_criterion=valid_criterion,
         )
         assert config.to_dict()["ranking_criterion"]["id"] == "sentiment"
+
+        with pytest.raises(ValueError, match="exactly"):
+            LabelConfig(
+                mode="ranking",
+                labels=[],
+                ranking_criterion={**valid_criterion, "unexpected": True},
+            )
+        with pytest.raises(ValueError, match="exactly"):
+            LabelConfig(
+                mode="ranking",
+                labels=[],
+                ranking_criterion={key: value for key, value in valid_criterion.items()
+                                   if key != "direction"},
+            )
 
         with pytest.raises(ValueError, match="ranking_criterion"):
             LabelConfig(mode="ranking", labels=[])

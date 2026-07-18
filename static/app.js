@@ -21,10 +21,11 @@ let currentRankingSet = null;
 let rankingDraft = [];
 let rankingSubmitting = false;
 let rankingFocusedCandidateId = null;
-let pendingRankingRequest = null;
+const pendingRankingRequests = new Map();
 let pendingRankingUndo = null;
 let rankingUndoInFlight = false;
 const rankingSubmissionStack = [];
+const historyCorrectionStates = new WeakMap();
 let preloadedImages = [];
 let isLabeling = false;
 let lastSubmitAt = 0;
@@ -68,17 +69,31 @@ function rankingPayloadKey(payload) {
     return JSON.stringify(payload);
 }
 
-function getRankingRequestId(payload) {
-    const key = rankingPayloadKey(payload);
-    if (!pendingRankingRequest || pendingRankingRequest.key !== key) {
-        pendingRankingRequest = { key, requestId: generateUUID() };
-    }
-    return pendingRankingRequest.requestId;
+function rankingRequestStateKey(payload, operation, endpoint) {
+    return `${operation}:${endpoint}:${rankingPayloadKey(payload)}`;
 }
 
-function clearPendingRankingRequest(payload = null) {
-    if (!payload || pendingRankingRequest?.key === rankingPayloadKey(payload)) {
-        pendingRankingRequest = null;
+function getRankingRequestId(payload, operation = 'submit', endpoint = '/api/rank') {
+    const key = rankingPayloadKey(payload);
+    const stateKey = rankingRequestStateKey(payload, operation, endpoint);
+    const pending = pendingRankingRequests.get(stateKey);
+    if (!pending || pending.key !== key) {
+        pendingRankingRequests.set(stateKey, { key, requestId: generateUUID() });
+    }
+    return pendingRankingRequests.get(stateKey).requestId;
+}
+
+function clearPendingRankingRequest(payload = null, operation = 'submit', endpoint = '/api/rank') {
+    const scope = `${operation}:${endpoint}:`;
+    if (!payload) {
+        for (const stateKey of pendingRankingRequests.keys()) {
+            if (stateKey.startsWith(scope)) pendingRankingRequests.delete(stateKey);
+        }
+        return;
+    }
+    const stateKey = rankingRequestStateKey(payload, operation, endpoint);
+    if (pendingRankingRequests.get(stateKey)?.key === rankingPayloadKey(payload)) {
+        pendingRankingRequests.delete(stateKey);
     }
 }
 
@@ -764,7 +779,7 @@ async function submitRanking(outcome = 'ranked', orderedCandidateIds = rankingDr
     try {
         const payload = {
             ...logicalPayload,
-            request_id: getRankingRequestId(logicalPayload)
+            request_id: getRankingRequestId(logicalPayload, 'submit', '/api/rank')
         };
 
         const res = await fetch('/api/rank', {
@@ -773,7 +788,7 @@ async function submitRanking(outcome = 'ranked', orderedCandidateIds = rankingDr
             body: JSON.stringify(payload)
         });
         const data = await res.json();
-        if (isDefinitiveRankingResponse(res)) clearPendingRankingRequest(logicalPayload);
+        if (isDefinitiveRankingResponse(res)) clearPendingRankingRequest(logicalPayload, 'submit', '/api/rank');
 
         if (res.status === 409) {
             showToast('Set changed elsewhere, loading the next set');
@@ -926,11 +941,63 @@ function togglePrediction() {
 // Statistics Modal
 // ============================================================================
 
+const modalOpeners = new Map();
+
+function getModalFocusableElements(modal) {
+    return Array.from(modal.querySelectorAll(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), audio, [tabindex]:not([tabindex="-1"])'
+    )).filter((element) => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+}
+
+function openModal(modal) {
+    if (!modal) return;
+    if (!modal.classList.contains('active')) {
+        modalOpeners.set(modal.id, document.activeElement);
+    }
+    modal.classList.add('active');
+    const [firstFocusable] = getModalFocusableElements(modal);
+    (firstFocusable || modal).focus();
+}
+
+function closeModalElement(modal) {
+    if (!modal?.classList.contains('active')) return;
+    modal.classList.remove('active');
+    const opener = modalOpeners.get(modal.id);
+    modalOpeners.delete(modal.id);
+    if (opener && opener.isConnected !== false && typeof opener.focus === 'function') {
+        opener.focus();
+    }
+}
+
+function trapModalFocus(event) {
+    if (event.key !== 'Tab') return false;
+    const modal = document.querySelector('.modal.active');
+    if (!modal) return false;
+
+    const focusable = getModalFocusableElements(modal);
+    if (!focusable.length) {
+        event.preventDefault();
+        modal.focus();
+        return true;
+    }
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !modal.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !modal.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+    }
+    return true;
+}
+
 async function showStats() {
     const modal = document.getElementById('statsModal');
     const content = document.getElementById('statsContent');
 
-    modal.classList.add('active');
+    openModal(modal);
     content.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
     try {
@@ -998,12 +1065,12 @@ async function showStats() {
 }
 
 function closeStats() {
-    document.getElementById('statsModal').classList.remove('active');
+    closeModalElement(document.getElementById('statsModal'));
 }
 
 function closeModal(event) {
     if (event.target.classList.contains('modal')) {
-        event.target.classList.remove('active');
+        closeModalElement(event.target);
     }
 }
 
@@ -1027,7 +1094,7 @@ async function showHistory() {
             ).join('');
     }
 
-    modal.classList.add('active');
+    openModal(modal);
     loadHistory(1);
 }
 
@@ -1180,6 +1247,33 @@ function renderRankingHistoryCandidate(candidate, fallbackPosition) {
     </article>`;
 }
 
+function getHistoryCorrectionState(panel) {
+    let state = historyCorrectionStates.get(panel);
+    if (!state) {
+        state = { inFlight: false, payload: null };
+        historyCorrectionStates.set(panel, state);
+    }
+    return state;
+}
+
+function setHistoryCorrectionBusy(panel, isBusy) {
+    const state = getHistoryCorrectionState(panel);
+    const controls = Array.from(panel.querySelectorAll('[data-ranking-history-candidate], [data-ranking-history-save], [data-ranking-history-invalid]'));
+    if (isBusy) {
+        state.disabledControls = new Map(controls.map((control) => [control, control.disabled]));
+    }
+    panel.dataset.correctionInFlight = String(isBusy);
+    controls.forEach((control) => {
+        if ('disabled' in control) {
+            control.disabled = isBusy
+                ? true
+                : state.disabledControls?.get(control) ?? false;
+        }
+        control.setAttribute('aria-disabled', String(isBusy));
+        control.classList.toggle('is-busy', isBusy);
+    });
+}
+
 function bindRankingHistoryControls() {
     document.querySelectorAll('[data-ranking-history-correction]').forEach((panel) => {
         let order;
@@ -1193,6 +1287,7 @@ function bindRankingHistoryControls() {
         const candidateCards = Array.from(panel.querySelectorAll('[data-ranking-history-candidate]'));
         const candidateIds = candidateCards.map((card) => card.dataset.candidateId);
         const candidateNames = new Map(candidateCards.map((card) => [card.dataset.candidateId, card.querySelector('.ranking-card-label')?.textContent || card.textContent]));
+        const state = getHistoryCorrectionState(panel);
         const update = () => {
             const knownIds = new Set(candidateIds);
             order = order.filter((candidateId, index) => knownIds.has(candidateId) && order.indexOf(candidateId) === index);
@@ -1210,14 +1305,18 @@ function bindRankingHistoryControls() {
 
         candidateCards.forEach((card) => {
             card.addEventListener('click', (event) => {
+                if (state.inFlight) return;
                 if (event.target.closest('audio, a, input, select, textarea')) return;
+                if (state.payload) {
+                    clearPendingRankingRequest(state.payload, 'history-correction', '/api/history/rerank');
+                    state.payload = null;
+                }
                 const candidateId = card.dataset.candidateId;
                 if (order.includes(candidateId)) {
                     order = order.filter((id) => id !== candidateId);
                 } else {
                     order = [...order, candidateId];
                 }
-                clearPendingRankingRequest();
                 update();
             });
             card.addEventListener('keydown', (event) => {
@@ -1228,16 +1327,18 @@ function bindRankingHistoryControls() {
             });
         });
         panel.querySelector('[data-ranking-history-save]').addEventListener('click', () => {
-            rerankHistorySet(panel.dataset.setId, panel.dataset.revision, order, 'ranked', null, candidateIds);
+            if (state.inFlight) return;
+            rerankHistorySet(panel.dataset.setId, panel.dataset.revision, order, 'ranked', null, candidateIds, panel);
         });
         panel.querySelector('[data-ranking-history-invalid]').addEventListener('click', () => {
-            rerankHistorySet(panel.dataset.setId, panel.dataset.revision, [], 'invalid', 'user_marked_invalid', candidateIds);
+            if (state.inFlight) return;
+            rerankHistorySet(panel.dataset.setId, panel.dataset.revision, [], 'invalid', 'user_marked_invalid', candidateIds, panel);
         });
         update();
     });
 }
 
-async function rerankHistorySet(setId, revision, orderedCandidateIds, outcome = 'ranked', invalidReason = null, knownCandidateIds = []) {
+async function rerankHistorySet(setId, revision, orderedCandidateIds, outcome = 'ranked', invalidReason = null, knownCandidateIds = [], panel = null) {
     const orderedIds = orderedCandidateIds.map((candidateId) => String(candidateId));
     if (outcome === 'ranked' && (orderedIds.length !== knownCandidateIds.length || new Set(orderedIds).size !== orderedIds.length || !knownCandidateIds.every((candidateId) => orderedIds.includes(candidateId)))) {
         showToast('Choose every candidate exactly once');
@@ -1252,6 +1353,13 @@ async function rerankHistorySet(setId, revision, orderedCandidateIds, outcome = 
         ordered_candidate_ids: outcome === 'ranked' ? orderedIds : [],
         invalid_reason: invalidReason || null
     };
+    const state = panel ? getHistoryCorrectionState(panel) : null;
+    if (state?.inFlight) return;
+    if (state) {
+        state.inFlight = true;
+        state.payload = logicalPayload;
+        setHistoryCorrectionBusy(panel, true);
+    }
 
     try {
         const res = await fetch('/api/history/rerank', {
@@ -1259,11 +1367,14 @@ async function rerankHistorySet(setId, revision, orderedCandidateIds, outcome = 
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 ...logicalPayload,
-                request_id: getRankingRequestId(logicalPayload)
+                request_id: getRankingRequestId(logicalPayload, 'history-correction', '/api/history/rerank')
             })
         });
         const data = await res.json();
-        if (isDefinitiveRankingResponse(res)) clearPendingRankingRequest(logicalPayload);
+        if (isDefinitiveRankingResponse(res)) {
+            clearPendingRankingRequest(logicalPayload, 'history-correction', '/api/history/rerank');
+            if (state) state.payload = null;
+        }
         if (!res.ok || data.success === false) {
             showToast(data.message || data.detail || 'Failed to update ranking');
             return;
@@ -1278,6 +1389,11 @@ async function rerankHistorySet(setId, revision, orderedCandidateIds, outcome = 
     } catch (err) {
         console.error('Ranking history correction failed:', err);
         showToast('Network error updating ranking; retry the same correction');
+    } finally {
+        if (state) {
+            state.inFlight = false;
+            setHistoryCorrectionBusy(panel, false);
+        }
     }
 }
 
@@ -1337,7 +1453,7 @@ async function relabelFromHistory(imageId) {
 }
 
 function closeHistory() {
-    document.getElementById('historyModal').classList.remove('active');
+    closeModalElement(document.getElementById('historyModal'));
 }
 
 // ============================================================================
@@ -1412,10 +1528,10 @@ document.addEventListener('keydown', (e) => {
     const key = e.key.toLowerCase();
 
     if (key === 'escape') {
-        closeStats();
-        closeHistory();
+        closeModalElement(document.querySelector('.modal.active'));
         return;
     }
+    if (trapModalFocus(e)) return;
     if (isShortcutSuppressed(e)) return;
 
     if (isRankingMode()) {

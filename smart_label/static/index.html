@@ -41,7 +41,7 @@
     </div>
 
     <!-- Stats Modal -->
-    <div class="modal" id="statsModal" role="dialog" aria-modal="true" aria-labelledby="statsTitle" onclick="closeModal(event)">
+    <div class="modal" id="statsModal" role="dialog" aria-modal="true" aria-labelledby="statsTitle" tabindex="-1" onclick="closeModal(event)">
         <div class="modal-content" onclick="event.stopPropagation()">
             <h2 id="statsTitle">📊 Labeling Statistics</h2>
             <div id="statsContent">Loading...</div>
@@ -50,7 +50,7 @@
     </div>
 
     <!-- History Modal -->
-    <div class="modal" id="historyModal" role="dialog" aria-modal="true" aria-labelledby="historyTitle" onclick="closeModal(event)">
+    <div class="modal" id="historyModal" role="dialog" aria-modal="true" aria-labelledby="historyTitle" tabindex="-1" onclick="closeModal(event)">
         <div class="modal-content modal-large" onclick="event.stopPropagation()">
             <div class="modal-header">
                 <h2 id="historyTitle">📜 Labeling History</h2>

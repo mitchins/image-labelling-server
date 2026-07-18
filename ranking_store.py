@@ -211,8 +211,45 @@ def _table_columns(connection: sqlite3.Connection, table: str) -> set:
     return {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
 
 
+_CURRENT_SCHEMA_COLUMNS = {
+    "ranking_tasks": {
+        "task_id", "mode", "criterion_json", "task_settings_json", "created_at",
+    },
+    "ranking_sets": {
+        "set_id", "source_position", "display_position", "set_metadata_json",
+        "current_revision", "current_outcome", "current_order_json", "current_invalid_reason",
+        "current_session_id", "current_request_id", "current_timestamp",
+    },
+    "ranking_candidates": {
+        "set_id", "candidate_id", "source_position", "display_position", "path", "media_type",
+        "metadata_json",
+    },
+    "ranking_revisions": {
+        "set_id", "revision", "action", "outcome", "ordered_candidate_ids_json",
+        "expected_revision", "invalid_reason", "session_id", "request_id", "timestamp",
+        "undo_of_revision", "request_payload_json",
+    },
+}
+
+
+def _has_current_schema(connection: sqlite3.Connection) -> bool:
+    tables = {
+        row[0]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    return all(
+        table in tables and required <= _table_columns(connection, table)
+        for table, required in _CURRENT_SCHEMA_COLUMNS.items()
+    )
+
+
 def _ensure_schema(connection: sqlite3.Connection) -> None:
     """Create or migrate the schema while serializing first-use upgrades."""
+    # Reads of a complete native schema must not compete with an active writer
+    # for SQLite's RESERVED lock.  An incomplete schema still takes the lock so
+    # the migration below remains serialized across processes.
+    if _has_current_schema(connection):
+        return
     owns_transaction = not connection.in_transaction
     if owns_transaction:
         connection.execute("BEGIN IMMEDIATE")
@@ -306,11 +343,14 @@ def _ensure_schema_locked(connection: sqlite3.Connection) -> None:
         "UPDATE ranking_revisions SET ordered_candidate_ids_json = "
         "CASE WHEN is_invalid = 1 OR ranking_json IS NULL THEN '[]' ELSE ranking_json END"
     )
-    connection.execute(
-        "UPDATE ranking_revisions SET timestamp = COALESCE(created_at, ?) "
-        "WHERE timestamp IS NULL",
-        (_utc_now(),),
-    )
+    for legacy_revision in connection.execute(
+        "SELECT rowid AS legacy_rowid, timestamp, created_at FROM ranking_revisions"
+    ).fetchall():
+        timestamp = _canonical_timestamp(legacy_revision["timestamp"] or legacy_revision["created_at"])
+        connection.execute(
+            "UPDATE ranking_revisions SET timestamp = ? WHERE rowid = ?",
+            (timestamp, legacy_revision["legacy_rowid"]),
+        )
 
     settings = {}
     if "settings" in tables:
@@ -391,7 +431,7 @@ def _validate_candidate(candidate: Mapping[str, Any], index: int) -> Dict[str, A
     metadata = candidate.get("metadata", {})
     if not isinstance(metadata, Mapping):
         raise RankingBadRequestError("candidate.metadata must be an object")
-    source_position = candidate.get("source_position", index)
+    source_position = candidate.get("source_position", index + 1)
     return {
         "candidate_id": candidate_id,
         "source_position": _position(source_position, "candidate.source_position"),
@@ -417,7 +457,7 @@ def _validate_sets(supplied_sets: Sequence[Mapping[str, Any]]) -> List[Dict[str,
         if set_id in seen_sets:
             raise RankingBadRequestError(f"duplicate set_id: {set_id}")
         seen_sets.add(set_id)
-        source_position = supplied.get("source_position", set_index)
+        source_position = supplied.get("source_position", set_index + 1)
         source_position = _position(source_position, "set.source_position")
         if source_position in seen_source_positions:
             raise RankingBadRequestError(f"duplicate set source_position: {source_position}")
@@ -528,6 +568,25 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _canonical_timestamp(value: Any) -> str:
+    """Normalize legacy timestamps, whose naive values are SQLite UTC timestamps."""
+    if not isinstance(value, str) or not value.strip():
+        return _utc_now()
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return _utc_now()
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 def _task_or_404(connection: sqlite3.Connection) -> sqlite3.Row:
     was_in_transaction = connection.in_transaction
     _ensure_schema(connection)
@@ -564,13 +623,19 @@ def _state_from_set(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
-def _set_payload(connection: sqlite3.Connection, row: sqlite3.Row) -> Dict[str, Any]:
-    candidates = []
+def _set_payload(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    candidates: Optional[Sequence[sqlite3.Row]] = None,
+) -> Dict[str, Any]:
+    if candidates is None:
+        candidates = _candidates(connection, row["set_id"])
+    candidate_payloads = []
     state = _state_from_set(row)
     rank_positions = {candidate_id: position for position, candidate_id in enumerate(
         state["ordered_candidate_ids"], start=1
     )}
-    for candidate in _candidates(connection, row["set_id"]):
+    for candidate in candidates:
         item = {
             "candidate_id": candidate["candidate_id"],
             "path": candidate["path"],
@@ -580,13 +645,13 @@ def _set_payload(connection: sqlite3.Connection, row: sqlite3.Row) -> Dict[str, 
             "display_position": candidate["display_position"],
             "rank_position": rank_positions.get(candidate["candidate_id"]),
         }
-        candidates.append(item)
+        candidate_payloads.append(item)
     result = {
         "set_id": row["set_id"],
         "source_position": row["source_position"],
         "display_position": row["display_position"],
         "metadata": _read_json(row["set_metadata_json"]),
-        "candidates": candidates,
+        "candidates": candidate_payloads,
         "current": state,
     }
     # Keep the current state flat as well; this is convenient for API adapters.
@@ -663,6 +728,29 @@ def _revision_payload(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
+def _validate_pagination(limit: Optional[int], offset: int) -> None:
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise RankingBadRequestError("offset must be a non-negative integer")
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 0):
+        raise RankingBadRequestError("limit must be a non-negative integer")
+
+
+def _joined_revision_payload(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "set_id": row["set_id"],
+        "revision": row["history_revision"],
+        "action": row["history_action"],
+        "outcome": row["history_outcome"],
+        "ordered_candidate_ids": _read_json(row["history_ordered_candidate_ids_json"]),
+        "expected_revision": row["history_expected_revision"],
+        "invalid_reason": row["history_invalid_reason"],
+        "session_id": row["history_session_id"],
+        "request_id": row["history_request_id"],
+        "timestamp": row["history_timestamp"],
+        "undo_of_revision": row["history_undo_of_revision"],
+    }
+
+
 def get_history(
     database: Database,
     set_id: Optional[str] = None,
@@ -675,10 +763,7 @@ def get_history(
         _text(set_id, "set_id")
     if session_id is not None:
         _text(session_id, "session_id")
-    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-        raise RankingBadRequestError("offset must be a non-negative integer")
-    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 0):
-        raise RankingBadRequestError("limit must be a non-negative integer")
+    _validate_pagination(limit, offset)
     with _connection(database) as connection:
         _task_or_404(connection)
         if set_id is not None:
@@ -704,6 +789,71 @@ def get_history(
             query += " LIMIT -1 OFFSET ?"
             values.append(offset)
         return [_revision_payload(row) for row in connection.execute(query, values).fetchall()]
+
+
+def get_latest_completed_sets(
+    database: Database,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """Return the newest completed set state page and its total count.
+
+    The page is selected in SQLite and candidates for all returned sets are
+    hydrated with one query, matching the payload assembled by the ranking API
+    without loading every revision or issuing one candidate query per set.
+    """
+    _validate_pagination(limit, offset)
+    with _connection(database) as connection:
+        _task_or_404(connection)
+        total = connection.execute(
+            "SELECT COUNT(*) FROM ranking_sets WHERE current_outcome IN ('ranked', 'invalid')"
+        ).fetchone()[0]
+        query = """
+            SELECT s.*,
+                   r.revision AS history_revision,
+                   r.action AS history_action,
+                   r.outcome AS history_outcome,
+                   r.ordered_candidate_ids_json AS history_ordered_candidate_ids_json,
+                   r.expected_revision AS history_expected_revision,
+                   r.invalid_reason AS history_invalid_reason,
+                   r.session_id AS history_session_id,
+                   r.request_id AS history_request_id,
+                   r.timestamp AS history_timestamp,
+                   r.undo_of_revision AS history_undo_of_revision
+            FROM ranking_sets AS s
+            JOIN ranking_revisions AS r
+              ON r.set_id = s.set_id AND r.revision = s.current_revision
+            WHERE s.current_outcome IN ('ranked', 'invalid')
+            ORDER BY s.current_timestamp DESC, s.set_id, s.current_revision DESC
+        """
+        values: List[Any] = []
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            values.extend([limit, offset])
+        elif offset:
+            query += " LIMIT -1 OFFSET ?"
+            values.append(offset)
+        page_rows = connection.execute(query, values).fetchall()
+
+        candidates_by_set: Dict[str, List[sqlite3.Row]] = {
+            row["set_id"]: [] for row in page_rows
+        }
+        if candidates_by_set:
+            set_ids = list(candidates_by_set)
+            placeholders = ", ".join("?" for _ in set_ids)
+            for candidate in connection.execute(
+                "SELECT * FROM ranking_candidates "
+                f"WHERE set_id IN ({placeholders}) ORDER BY set_id, display_position",
+                set_ids,
+            ):
+                candidates_by_set[candidate["set_id"]].append(candidate)
+
+        items = []
+        for row in page_rows:
+            item = _set_payload(connection, row, candidates_by_set[row["set_id"]])
+            item.update(_joined_revision_payload(row))
+            items.append(item)
+        return {"items": items, "total": total}
 
 
 def _normalize_submission(request: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1125,6 +1275,9 @@ class RankingStore:
     def get_history(self, set_id=None, session_id=None, limit=None, offset=0):
         return get_history(self.database, set_id, session_id, limit, offset)
 
+    def get_latest_completed_sets(self, limit=None, offset=0):
+        return get_latest_completed_sets(self.database, limit, offset)
+
     def submit_revision(self, request=None, **kwargs):
         if request is None:
             request = kwargs
@@ -1147,7 +1300,8 @@ __all__ = [
     "RankingBadRequestError", "RankingConflictError", "RankingConflict", "RankingNotFoundError",
     "RankingNotFound", "RankingStore", "RankingStoreError", "InvalidRankingRequest",
     "RankingValidationError",
-    "build_ranking_export", "create_ranking_task", "create_task", "get_history", "get_next_set", "get_set",
+    "build_ranking_export", "create_ranking_task", "create_task", "get_history",
+    "get_latest_completed_sets", "get_next_set", "get_set",
     "get_stats", "initialize_ranking_store", "initialize_schema", "submit_revision",
     "undo_last_for_session",
 ]

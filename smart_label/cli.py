@@ -15,6 +15,21 @@ import argparse
 import sys
 
 
+def _run_ingest_ranking(args):
+    import sqlite3
+
+    from ingest_ranking import RankingIngestError, ingest_ranking
+
+    try:
+        return ingest_ranking(
+            args.jsonl, args.db, config_path=args.config, name=args.name,
+            description=args.description, base_dir=args.base_dir, shuffle=args.shuffle,
+            seed=args.seed, absolute_paths=args.absolute_paths,
+        )
+    except (RankingIngestError, FileNotFoundError, OSError, sqlite3.Error) as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Smart Label - Intelligent Human Labeling System',
@@ -233,12 +248,7 @@ Examples:
         ingest_audio_main()
 
     elif args.command == 'ingest-ranking':
-        from ingest_ranking import ingest_ranking as create_ranking_task
-        create_ranking_task(
-            args.jsonl, args.db, config_path=args.config, name=args.name,
-            description=args.description, base_dir=args.base_dir, shuffle=args.shuffle,
-            seed=args.seed, absolute_paths=args.absolute_paths,
-        )
+        _run_ingest_ranking(args)
 
     elif args.command == 'serve':
         from smart_label.server import main as serve_main
