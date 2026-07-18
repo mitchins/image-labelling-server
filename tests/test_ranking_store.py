@@ -7,6 +7,7 @@ import pytest
 from ingest_ranking import ingest_ranking
 
 from ranking_store import (
+    _canonical_timestamp,
     RankingBadRequestError,
     RankingConflictError,
     RankingNotFoundError,
@@ -487,7 +488,9 @@ def test_migrated_legacy_timestamps_keep_history_and_undo_chronology(tmp_path):
     assert undo_last_for_session(database, "legacy")["set_id"] == "newer"
 
 
-def test_latest_completed_sets_is_paginated_and_bulk_hydrated(db):
+def test_latest_completed_sets_is_paginated_and_bulk_hydrated(db, monkeypatch):
+    timestamps = iter(("2026-07-18T01:00:00+00:00", "2026-07-18T02:00:00+00:00"))
+    monkeypatch.setattr("ranking_store._utc_now", lambda: next(timestamps))
     submit_revision(db, request("set-a", "history-a", 0, "history", ordered=["a-2", "a-1"]))
     submit_revision(db, request("set-b", "history-b", 0, "history", outcome="invalid", invalid_reason="unclear"))
 
@@ -503,6 +506,12 @@ def test_latest_completed_sets_is_paginated_and_bulk_hydrated(db):
             expected.append({**get_set(db, revision["set_id"]), **revision})
     assert newest["items"][0] == expected[0]
     assert remaining["items"][0] == expected[1]
+
+
+@pytest.mark.parametrize("value", [None, "", "not-a-timestamp"])
+def test_canonical_timestamp_rejects_missing_or_malformed_values(value):
+    with pytest.raises(ValueError, match="timestamp"):
+        _canonical_timestamp(value)
 
 
 def test_repeated_undo_skips_prior_undo_revision_and_reaches_pending(db):

@@ -9,6 +9,8 @@ const appPath = path.join(root, 'static/app.js');
 const mirroredAppPath = path.join(root, 'smart_label/static/app.js');
 const htmlPath = path.join(root, 'static/index.html');
 const mirroredHtmlPath = path.join(root, 'smart_label/static/index.html');
+const cssPath = path.join(root, 'static/style.css');
+const mirroredCssPath = path.join(root, 'smart_label/static/style.css');
 const appSource = fs.readFileSync(appPath, 'utf8');
 const htmlSource = fs.readFileSync(htmlPath, 'utf8');
 
@@ -32,6 +34,7 @@ function loadRequestHelpers() {
 test('frontend copies remain byte-for-byte identical', () => {
     assert.equal(fs.readFileSync(appPath, 'utf8'), fs.readFileSync(mirroredAppPath, 'utf8'));
     assert.equal(fs.readFileSync(htmlPath, 'utf8'), fs.readFileSync(mirroredHtmlPath, 'utf8'));
+    assert.equal(fs.readFileSync(cssPath, 'utf8'), fs.readFileSync(mirroredCssPath, 'utf8'));
 });
 
 test('ranking request IDs are operation and endpoint scoped and retry-stable', () => {

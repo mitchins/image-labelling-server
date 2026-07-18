@@ -571,7 +571,7 @@ def _utc_now() -> str:
 def _canonical_timestamp(value: Any) -> str:
     """Normalize legacy timestamps, whose naive values are SQLite UTC timestamps."""
     if not isinstance(value, str) or not value.strip():
-        return _utc_now()
+        raise ValueError("legacy timestamp must be a non-empty string")
     raw = value.strip()
     if raw.endswith("Z"):
         raw = raw[:-1] + "+00:00"
@@ -580,8 +580,8 @@ def _canonical_timestamp(value: Any) -> str:
     except ValueError:
         try:
             parsed = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return _utc_now()
+        except ValueError as exc:
+            raise ValueError(f"invalid legacy timestamp: {value!r}") from exc
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc).isoformat()
