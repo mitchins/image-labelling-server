@@ -131,6 +131,31 @@ python -m smart_label serve --db /path/to/queue.db --config /path/to/task.json
 
 `serve` uses `--db` when provided, otherwise it falls back to `db_path` in the config.
 
+### 4) Rank supplied candidate sets for one criterion
+
+Ranking mode records an ordinal best-first order, not scores. Each JSONL line is
+one atomic pairwise or setwise comparison with 2–8 candidates:
+
+```json
+{"set_id":"sentiment-001","criterion":{"id":"positive-sentiment","version":"v1","prompt":"Which clip sounds most positive?","direction":"most"},"metadata":{"split":"train"},"candidates":[{"candidate_id":"a","path":"/audio/a.wav","media_type":"audio","metadata":{"text":"Fine."}},{"candidate_id":"b","path":"/audio/b.wav","media_type":"audio","metadata":{"text":"Wonderful!"}}]}
+```
+
+```bash
+python -m smart_label ingest-ranking \
+  --jsonl sentiment-sets.jsonl \
+  --db sentiment-ranking.db \
+  --config sentiment-ranking.json
+
+python -m smart_label serve --db sentiment-ranking.db --config sentiment-ranking.json
+```
+
+Card numbers are fixed display positions. For pairs, `1` or `2` selects the
+winner and submits immediately. For larger sets, press card numbers in best-first
+order, `Backspace` to remove the last draft choice, and `Enter` to submit. `X`
+marks the whole set invalid, `R` replays audio, and `Z` appends an auditable undo.
+Ties, partial orders, scores, active pair generation, and model fitting are
+deliberately outside this mode.
+
 ## Configure Any Task
 
 Create a config file to use Smart Label for any classification task:
@@ -218,6 +243,12 @@ CREATE TABLE settings (
 | `/api/history` | GET | Paginated history (filter by label) |
 | `/api/history/{id}/relabel` | POST | Change existing label |
 | `/api/export` | GET | Download all labels as JSON |
+
+Ranking mode also exposes `/api/rank`, `/api/ranking/media`, and
+`/api/history/rerank`. Ranking submissions use a request ID and expected revision
+so retries are idempotent and stale tabs cannot overwrite newer work. Exports
+retain typed metadata, source/display/rank positions, current state, and every
+append-only revision; downstream ML code chooses how to fit a ranking model.
 
 ## Export
 

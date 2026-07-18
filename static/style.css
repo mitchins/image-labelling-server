@@ -202,6 +202,306 @@ body {
 
 .confirmation-receipt { display: none; }
 
+/* Ranking mode */
+.ranking-shell {
+    width: min(1180px, 96vw);
+    padding: 24px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+}
+
+.ranking-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 20px;
+}
+
+.ranking-eyebrow,
+.ranking-criterion-meta,
+.ranking-instruction,
+.ranking-drag-hint {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.ranking-prompt {
+    margin-top: 6px;
+    font-size: 24px;
+    line-height: 1.25;
+}
+
+.ranking-direction {
+    flex: 0 0 auto;
+    padding: 8px 12px;
+    border: 1px solid var(--accent-green);
+    border-radius: 999px;
+    color: var(--accent-green);
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.ranking-criterion-meta {
+    margin-top: 8px;
+}
+
+.ranking-instruction {
+    margin: 16px 0;
+}
+
+.ranking-key-hint {
+    margin-left: 8px;
+    color: var(--accent-blue);
+}
+
+.ranking-candidates {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+}
+
+.ranking-candidate {
+    min-width: 0;
+    padding: 10px;
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    cursor: pointer;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+
+.ranking-candidate:hover,
+.ranking-candidate:focus-visible {
+    border-color: var(--accent-blue);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.3);
+    transform: translateY(-2px);
+}
+
+.ranking-candidate.is-selected {
+    border-color: var(--accent-green);
+    box-shadow: inset 0 0 0 1px var(--accent-green);
+}
+
+.ranking-candidate.is-busy {
+    cursor: wait;
+    opacity: 0.7;
+    pointer-events: none;
+    transform: none;
+}
+
+.ranking-card-header,
+.ranking-draft-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.ranking-card-header {
+    margin-bottom: 8px;
+}
+
+.ranking-card-number {
+    display: inline-flex;
+    width: 26px;
+    height: 26px;
+    align-items: center;
+    justify-content: center;
+    background: var(--accent-blue);
+    border-radius: 6px;
+    color: white;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.ranking-card-label,
+.ranking-draft-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ranking-card-label {
+    flex: 1;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.ranking-selected-mark {
+    color: var(--accent-green);
+    font-weight: 700;
+}
+
+.ranking-media {
+    display: flex;
+    min-height: 120px;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background: var(--bg-dark);
+    border-radius: 7px;
+}
+
+.ranking-media img {
+    width: 100%;
+    height: 150px;
+    object-fit: contain;
+}
+
+.ranking-media-audio {
+    min-height: 90px;
+    padding: 12px;
+}
+
+.ranking-media audio {
+    width: 100%;
+}
+
+.ranking-metadata {
+    margin-top: 8px;
+    font-size: 11px;
+}
+
+.ranking-metadata-row {
+    display: grid;
+    grid-template-columns: minmax(60px, 0.4fr) 1fr;
+    gap: 8px;
+    padding: 2px 0;
+}
+
+.ranking-metadata dt {
+    color: var(--text-secondary);
+    text-transform: capitalize;
+}
+
+.ranking-metadata dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.ranking-card-hint {
+    margin-top: 8px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    text-align: right;
+}
+
+.ranking-draft-panel {
+    margin-top: 18px;
+    padding: 14px;
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+}
+
+.ranking-draft-header {
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+
+.ranking-draft-header h3 {
+    font-size: 15px;
+}
+
+.ranking-draft-count {
+    color: var(--accent-blue);
+    font-weight: 400;
+}
+
+.ranking-draft-empty {
+    padding: 12px 0;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.ranking-draft-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.ranking-draft-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 8px;
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: grab;
+}
+
+.ranking-draft-item:active,
+.ranking-draft-item.is-dragging {
+    cursor: grabbing;
+    opacity: 0.55;
+}
+
+.ranking-draft-rank {
+    width: 22px;
+    color: var(--accent-blue);
+    font-weight: 700;
+    text-align: center;
+}
+
+.ranking-draft-name {
+    flex: 1;
+    font-size: 13px;
+}
+
+.ranking-move {
+    min-width: 30px;
+    padding: 4px 8px;
+}
+
+.ranking-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.btn-ranking-submit {
+    background: var(--accent-green);
+    color: white;
+}
+
+.btn-ranking-invalid {
+    background: var(--accent-red);
+    color: white;
+}
+
+.ranking-actions .btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+
+.ranking-history-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 14px;
+    background: var(--bg-hover);
+    border-radius: 8px;
+}
+
+.ranking-history-summary {
+    min-width: 0;
+}
+
+.ranking-history-order {
+    margin-top: 6px;
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+}
+
 .confirmation-history-item {
     padding: 14px;
     background: var(--bg-hover);
@@ -774,5 +1074,30 @@ kbd {
 
     .history-audio-head {
         flex-direction: column;
+    }
+
+    .ranking-shell {
+        padding: 16px;
+    }
+
+    .ranking-header {
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .ranking-prompt {
+        font-size: 20px;
+    }
+
+    .ranking-direction {
+        align-self: flex-start;
+    }
+
+    .ranking-actions {
+        flex-direction: column;
+    }
+
+    .ranking-actions .btn {
+        width: 100%;
     }
 }

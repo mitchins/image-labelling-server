@@ -25,6 +25,7 @@ Commands:
   ingest-folder  Create queue from a folder of images
   ingest-audio   Create queue from a folder of audio clips
   ingest-jsonl   Create queue from a JSONL file
+  ingest-ranking Create a strict pairwise/setwise ranking task
   serve     Start the labeling web server
   export    Export labeled data to JSON
   stats     Show labeling statistics
@@ -113,6 +114,17 @@ Examples:
     ingest_jsonl.add_argument('--absolute-paths', action=argparse.BooleanOptionalAction, default=True)
     ingest_jsonl.add_argument('--limit', type=int)
     ingest_jsonl.add_argument('--shuffle', action=argparse.BooleanOptionalAction, default=True)
+
+    ingest_ranking = subparsers.add_parser('ingest-ranking', help='Create a ranking task from set JSONL')
+    ingest_ranking.add_argument('--jsonl', required=True, help='Path to ranking-set JSONL')
+    ingest_ranking.add_argument('--db', default='ranking_queue.db', help='Output database')
+    ingest_ranking.add_argument('--config', default='ranking_task.json', help='Output config JSON')
+    ingest_ranking.add_argument('--name', default='Ranking Task', help='Task name shown in UI')
+    ingest_ranking.add_argument('--description', default='', help='Optional task description')
+    ingest_ranking.add_argument('--base-dir', default=None, help='Base dir for relative media paths')
+    ingest_ranking.add_argument('--shuffle', action=argparse.BooleanOptionalAction, default=True)
+    ingest_ranking.add_argument('--seed', type=int, default=None, help='Reproducible display shuffle seed')
+    ingest_ranking.add_argument('--absolute-paths', action=argparse.BooleanOptionalAction, default=True)
 
     # Ingest-audio command
     ingest_audio = subparsers.add_parser('ingest-audio', help='Create queue from a folder of audio clips')
@@ -220,6 +232,14 @@ Examples:
         sys.argv.append('--absolute-paths' if args.absolute_paths else '--no-absolute-paths')
         ingest_audio_main()
 
+    elif args.command == 'ingest-ranking':
+        from ingest_ranking import ingest_ranking as create_ranking_task
+        create_ranking_task(
+            args.jsonl, args.db, config_path=args.config, name=args.name,
+            description=args.description, base_dir=args.base_dir, shuffle=args.shuffle,
+            seed=args.seed, absolute_paths=args.absolute_paths,
+        )
+
     elif args.command == 'serve':
         from smart_label.server import main as serve_main
         sys.argv = ['serve', '--port', str(args.port), '--host', args.host]
@@ -257,6 +277,10 @@ def export_labels(db_path: str, output_path: str, exclude_refuse: bool = False):
     with open(output_path, 'w') as f:
         json.dump(payload, f, indent=2)
     
+    if isinstance(payload, dict) and payload.get("mode") == "ranking":
+        items = payload["sets"]
+        print(f"Exported {len(items)} ranking sets to {output_path}")
+        return
     items = payload["items"] if isinstance(payload, dict) else payload
     print(f"Exported {len(items)} decisions to {output_path}")
     
@@ -289,6 +313,13 @@ def show_stats(db_path: str):
                 settings[key] = json.loads(raw_value)
             except (json.JSONDecodeError, TypeError):
                 settings[key] = raw_value
+    if settings.get("mode") == "ranking":
+        from ranking_store import get_stats
+        summary = get_stats(conn)
+        conn.close()
+        print(f"Progress: {summary['completed_sets']} / {summary['total_sets']} ({summary['percent']:.1f}%)")
+        print(f"Ranked: {summary['ranked_sets']}  Invalid: {summary['invalid_sets']}  Pending: {summary['pending_sets']}")
+        return
     status_column = "confirmation" if settings.get("mode") == "ontology_confirmation" else "human_label"
     
     # Total

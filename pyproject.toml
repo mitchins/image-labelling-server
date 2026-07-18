@@ -73,8 +73,10 @@ py-modules = [
     "ingest_audio",
     "ingest_folder",
     "ingest_jsonl",
+    "ingest_ranking",
     "media_utils",
     "prepare",
+    "ranking_store",
 ]
 
 [tool.setuptools.package-data]

@@ -25,12 +25,12 @@
         </div>
     </div>
     
-    <div class="main" id="main">
+    <main class="main" id="main" aria-label="Labeling workspace">
         <div class="loading">
             <div class="spinner"></div>
             <p>Loading...</p>
         </div>
-    </div>
+    </main>
 
     <div class="last-decision" id="lastDecisionGlobal" aria-live="polite"></div>
     
@@ -41,19 +41,19 @@
     </div>
 
     <!-- Stats Modal -->
-    <div class="modal" id="statsModal" onclick="closeModal(event)">
+    <div class="modal" id="statsModal" role="dialog" aria-modal="true" aria-labelledby="statsTitle" onclick="closeModal(event)">
         <div class="modal-content" onclick="event.stopPropagation()">
-            <h2>📊 Labeling Statistics</h2>
+            <h2 id="statsTitle">📊 Labeling Statistics</h2>
             <div id="statsContent">Loading...</div>
             <button class="btn-primary" onclick="closeStats()">Close</button>
         </div>
     </div>
 
     <!-- History Modal -->
-    <div class="modal" id="historyModal" onclick="closeModal(event)">
+    <div class="modal" id="historyModal" role="dialog" aria-modal="true" aria-labelledby="historyTitle" onclick="closeModal(event)">
         <div class="modal-content modal-large" onclick="event.stopPropagation()">
             <div class="modal-header">
-                <h2>📜 Labeling History</h2>
+                <h2 id="historyTitle">📜 Labeling History</h2>
                 <div class="history-controls">
                     <select id="historyFilter" onchange="loadHistory(1)">
                         <option value="">All Labels</option>
