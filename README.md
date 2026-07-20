@@ -165,6 +165,8 @@ Create a config file to use Smart Label for any classification task:
 name: "Object Classification"
 description: "Label objects in images"
 media_type: "image"               # or "audio"
+audio_autoplay_default: false      # Initial value for single-item audio review
+audio_autoplay_persistence: session # "session" or persistent "cookie"
 labels: ["car", "bike", "person", "building", "other"]
 label_colors:
   car: "#1976D2"

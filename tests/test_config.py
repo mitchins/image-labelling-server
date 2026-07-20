@@ -23,6 +23,8 @@ class TestLabelConfig:
         assert len(config.labels) == 3
         assert config.db_path == "queue.db"
         assert config.media_type == "image"
+        assert config.audio_autoplay_default is False
+        assert config.audio_autoplay_persistence == "session"
         assert config.host == "0.0.0.0"
         assert config.port == 8765
     
@@ -40,6 +42,18 @@ class TestLabelConfig:
         assert config.label_colors["cat"] == "#FF0000"
         assert config.db_path == "test.db"
         assert config.media_type == "audio"
+
+    def test_audio_autoplay_config(self):
+        config = LabelConfig(
+            media_type="audio",
+            audio_autoplay_default=True,
+            audio_autoplay_persistence="cookie",
+        )
+        assert config.to_dict()["audio_autoplay_default"] is True
+        assert config.to_dict()["audio_autoplay_persistence"] == "cookie"
+
+        with pytest.raises(ValueError, match="audio_autoplay_persistence"):
+            LabelConfig(audio_autoplay_persistence="local")
 
     def test_confirmation_config_contract(self):
         config = LabelConfig(

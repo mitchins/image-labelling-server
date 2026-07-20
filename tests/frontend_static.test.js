@@ -61,3 +61,12 @@ test('modal focus contract and history correction lifecycle are present', () => 
     assert.match(appSource, /state\.inFlight = true/);
     assert.match(appSource, /finally \{[\s\S]*setHistoryCorrectionBusy\(panel, false\)/);
 });
+
+test('audio autoplay is user-controlled and excluded from ranking candidates', () => {
+    assert.match(htmlSource, /id="audioAutoplayToggle"[^>]*aria-pressed="false"[^>]*hidden/);
+    assert.match(appSource, /audio_autoplay_persistence \|\| 'session'/);
+    assert.match(appSource, /document\.cookie = `\$\{key\}=\$\{enabled \? '1' : '0'\}/);
+    assert.match(appSource, /sessionStorage\.setItem\(key, enabled \? '1' : '0'\)/);
+    assert.equal((appSource.match(/\$\{audioAutoplayAttribute\(\)\}/g) || []).length, 2);
+    assert.doesNotMatch(appSource, /ranking-audio[^`]*audioAutoplayAttribute/);
+});

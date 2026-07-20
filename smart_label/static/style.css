@@ -96,6 +96,11 @@ body {
     background: var(--border);
 }
 
+.audio-autoplay-toggle[aria-pressed="true"] {
+    border-color: var(--accent-green);
+    color: var(--accent-green);
+}
+
 /* Main content */
 .main {
     flex: 1;

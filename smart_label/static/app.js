@@ -37,6 +37,53 @@ let CONFIG = null;
 let STYLES = ['flat', 'grim', 'modern', 'moe', 'painterly', 'retro'];
 let STYLE_COLORS = {};
 let KEY_MAP = {};
+let audioAutoplayEnabled = false;
+
+function audioAutoplayPreferenceKey() {
+    const task = String(CONFIG?.name || 'default').replace(/[^a-z0-9_-]+/gi, '_');
+    return `smart_label_audio_autoplay_${task}`;
+}
+
+function readAudioAutoplayPreference() {
+    const key = audioAutoplayPreferenceKey();
+    const persistence = CONFIG?.audio_autoplay_persistence || 'session';
+    const stored = persistence === 'cookie'
+        ? document.cookie.split('; ').find((entry) => entry.startsWith(`${key}=`))?.split('=')[1]
+        : sessionStorage.getItem(key);
+    return stored === undefined || stored === null
+        ? Boolean(CONFIG?.audio_autoplay_default)
+        : stored === '1';
+}
+
+function writeAudioAutoplayPreference(enabled) {
+    const key = audioAutoplayPreferenceKey();
+    if ((CONFIG?.audio_autoplay_persistence || 'session') === 'cookie') {
+        document.cookie = `${key}=${enabled ? '1' : '0'}; Path=/; Max-Age=31536000; SameSite=Lax`;
+    } else {
+        sessionStorage.setItem(key, enabled ? '1' : '0');
+    }
+}
+
+function updateAudioAutoplayControl(mediaType = CONFIG?.media_type) {
+    const button = document.getElementById('audioAutoplayToggle');
+    if (!button) return;
+    const available = !isRankingMode() && String(mediaType || '').toLowerCase() === 'audio';
+    button.hidden = !available;
+    button.textContent = `Autoplay: ${audioAutoplayEnabled ? 'On' : 'Off'}`;
+    button.setAttribute('aria-pressed', String(audioAutoplayEnabled));
+}
+
+function toggleAudioAutoplay() {
+    if (isRankingMode()) return;
+    audioAutoplayEnabled = !audioAutoplayEnabled;
+    writeAudioAutoplayPreference(audioAutoplayEnabled);
+    updateAudioAutoplayControl(getTaskMediaType());
+    if (audioAutoplayEnabled) document.getElementById('currentAudio')?.play().catch(() => {});
+}
+
+function audioAutoplayAttribute() {
+    return !isRankingMode() && audioAutoplayEnabled ? ' autoplay' : '';
+}
 
 function isConfirmationMode() {
     return CONFIG?.mode === 'ontology_confirmation';
@@ -137,6 +184,7 @@ async function loadConfig() {
     try {
         const res = await fetch('/api/config');
         CONFIG = await res.json();
+        audioAutoplayEnabled = readAudioAutoplayPreference();
 
         STYLES = CONFIG.labels || STYLES;
         STYLE_COLORS = CONFIG.label_colors || {};
@@ -151,6 +199,7 @@ async function loadConfig() {
         KEY_MAP.r = 'REPLAY';
 
         document.getElementById('taskName').textContent = CONFIG.name || 'Labeling Task';
+        updateAudioAutoplayControl();
         updateShortcutsDisplay();
     } catch (err) {
         console.warn('Failed to load config, using defaults:', err);
@@ -457,6 +506,7 @@ async function undoLast() {
 function renderItem(data) {
     const main = document.getElementById('main');
     const mediaType = getTaskMediaType(data);
+    updateAudioAutoplayControl(mediaType);
     updateShortcutsDisplay(mediaType);
 
     if (isRankingMode()) {
@@ -506,7 +556,7 @@ function renderItem(data) {
         ? `
             <div class="audio-review" aria-label="Audio review card">
                 <div class="audio-title">🎧 ${getItemName(data)}</div>
-                <audio id="currentAudio" src="${getMediaUrl(data)}" controls preload="auto"></audio>
+                <audio id="currentAudio" src="${getMediaUrl(data)}" controls preload="auto"${audioAutoplayAttribute()}></audio>
                 <button class="btn-secondary replay-btn" onclick="replayCurrentAudio()">Replay <kbd>R</kbd></button>
             </div>
         `
@@ -841,7 +891,7 @@ function renderConfirmationItem(data) {
     const mediaHtml = mediaType === 'audio'
         ? `<div class="audio-review">
             <div class="audio-title">${getItemName(data)}</div>
-            <audio id="currentAudio" src="${getMediaUrl(data)}" controls preload="auto"></audio>
+            <audio id="currentAudio" src="${getMediaUrl(data)}" controls preload="auto"${audioAutoplayAttribute()}></audio>
             <button class="btn-secondary replay-btn" onclick="replayCurrentAudio()">Replay <kbd>R</kbd></button>
           </div>`
         : `<div class="image-container"><img src="${getMediaUrl(data)}" alt="Item to confirm"></div>`;
