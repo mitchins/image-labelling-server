@@ -55,6 +55,9 @@ class TestLabelConfig:
         with pytest.raises(ValueError, match="audio_autoplay_persistence"):
             LabelConfig(audio_autoplay_persistence="local")
 
+        with pytest.raises(ValueError, match="audio_autoplay_default"):
+            LabelConfig(audio_autoplay_default="yes")
+
     def test_confirmation_config_contract(self):
         config = LabelConfig(
             mode="ontology_confirmation",
