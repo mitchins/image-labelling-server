@@ -168,6 +168,8 @@ def load_config_from_db(db_path: str):
         label_colors=label_colors,
         db_path=db_path,
         media_type=settings.get("media_type") or "image",
+        audio_autoplay_default=settings.get("audio_autoplay_default", False),
+        audio_autoplay_persistence=settings.get("audio_autoplay_persistence", "session"),
         hint_field=settings.get("hint_field"),
         hint_confidence_field=settings.get("hint_confidence_field"),
         cluster_field=settings.get("cluster_field"),

@@ -19,6 +19,8 @@
             <div class="progress-text" id="progressText">Loading...</div>
         </div>
         <div class="header-actions">
+            <button class="btn-secondary audio-autoplay-toggle" id="audioAutoplayToggle" type="button"
+                    onclick="toggleAudioAutoplay()" aria-pressed="false" hidden>Autoplay: Off</button>
             <button class="btn-secondary" onclick="showHistory()">📜 History</button>
             <button class="btn-secondary" onclick="showStats()">📊 Stats</button>
             <button class="btn-secondary" onclick="undoLast()">↩ Undo (Z)</button>

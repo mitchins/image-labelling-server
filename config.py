@@ -84,6 +84,8 @@ class LabelConfig:
 
     # Task media type
     media_type: str = "image"
+    audio_autoplay_default: bool = False
+    audio_autoplay_persistence: str = "session"
     
     # Optional hint/prediction field name in database (e.g., "predicted_style")
     # Set to None to disable hints
@@ -107,6 +109,10 @@ class LabelConfig:
 
     def __post_init__(self):
         validate_metadata_fields(self.metadata_fields)
+        if not isinstance(self.audio_autoplay_default, bool):
+            raise ValueError("audio_autoplay_default must be a boolean")
+        if self.audio_autoplay_persistence not in {"session", "cookie"}:
+            raise ValueError("audio_autoplay_persistence must be 'session' or 'cookie'")
         if self.mode not in {"classification", "ontology_confirmation", "ranking"}:
             raise ValueError(f"Unsupported labeling mode: {self.mode}")
         if self.mode == "ontology_confirmation":
@@ -170,6 +176,8 @@ class LabelConfig:
             "labels": self.labels,
             "label_colors": self.label_colors,
             "media_type": self.media_type,
+            "audio_autoplay_default": self.audio_autoplay_default,
+            "audio_autoplay_persistence": self.audio_autoplay_persistence,
             "hint_field": self.hint_field,
             "hint_confidence_field": self.hint_confidence_field,
             "cluster_field": self.cluster_field,
