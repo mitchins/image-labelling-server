@@ -190,7 +190,8 @@ python -m smart_label serve --config my_task.yaml
 | Key | Action |
 |-----|--------|
 | 1-9 | Assign label (in order) |
-| X / Space | Refuse (ambiguous) |
+| X | Refuse (ambiguous) |
+| Space | Reserved for native audio play/pause; never labels or advances |
 | Q | Bad quality (image tasks) |
 | R | Replay audio |
 | Z | Undo last |
@@ -198,7 +199,7 @@ python -m smart_label serve --config my_task.yaml
 | Esc | Close modal |
 
 In ontology confirmation mode, `1–4` are always `STRONG`, `LOOSE`, `NONE`, and
-`INVALID`; `X` and Space are deliberately disabled.
+`INVALID`; `X` is deliberately disabled and Space never labels or advances.
 
 ## Database Schema
 

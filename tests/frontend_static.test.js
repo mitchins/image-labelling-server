@@ -70,3 +70,12 @@ test('audio autoplay is user-controlled and excluded from ranking candidates', (
     assert.equal((appSource.match(/\$\{audioAutoplayAttribute\(\)\}/g) || []).length, 2);
     assert.doesNotMatch(appSource, /ranking-audio[^`]*audioAutoplayAttribute/);
 });
+
+test('space never labels, submits, or activates review cards', () => {
+    assert.doesNotMatch(appSource, /KEY_MAP\[' '\]/);
+    assert.doesNotMatch(appSource, /\['Enter', ' '\]/);
+    assert.doesNotMatch(appSource, /event\.key !== 'Enter' && event\.key !== ' '/);
+    assert.match(appSource, /function allowsNativeSpace\(target\)[\s\S]*closest\('audio, input, textarea, select, \[contenteditable="true"\]'\)/);
+    assert.match(appSource, /if \(key === ' '\) \{[\s\S]*allowsNativeSpace\(e\.target\)[\s\S]*e\.preventDefault\(\);[\s\S]*return;/);
+    assert.match(appSource, /addEventListener\('keyup'[\s\S]*e\.key === ' '[\s\S]*e\.preventDefault\(\)/);
+});
