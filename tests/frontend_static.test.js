@@ -75,7 +75,7 @@ test('space never labels, submits, or activates review cards', () => {
     assert.doesNotMatch(appSource, /KEY_MAP\[' '\]/);
     assert.doesNotMatch(appSource, /\['Enter', ' '\]/);
     assert.doesNotMatch(appSource, /event\.key !== 'Enter' && event\.key !== ' '/);
-    assert.match(appSource, /function allowsNativeSpace\(target\)[\s\S]*closest\('audio, input, textarea, select, \[contenteditable="true"\]'\)/);
+    assert.match(appSource, /function allowsNativeSpace\(target\)[\s\S]*isContentEditable/);
     assert.match(appSource, /if \(key === ' '\) \{[\s\S]*allowsNativeSpace\(e\.target\)[\s\S]*e\.preventDefault\(\);[\s\S]*return;/);
     assert.match(appSource, /addEventListener\('keyup'[\s\S]*e\.key === ' '[\s\S]*e\.preventDefault\(\)/);
 });

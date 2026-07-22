@@ -1571,7 +1571,7 @@ function isShortcutSuppressed(event) {
 
 function allowsNativeSpace(target) {
     return target instanceof Element
-        && Boolean(target.closest('audio, input, textarea, select, [contenteditable="true"]'));
+        && (target.isContentEditable || Boolean(target.closest('audio, input, textarea, select')));
 }
 
 // ============================================================================
