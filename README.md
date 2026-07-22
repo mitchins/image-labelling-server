@@ -191,7 +191,7 @@ python -m smart_label serve --config my_task.yaml
 |-----|--------|
 | 1-9 | Assign label (in order) |
 | X | Refuse (ambiguous) |
-| Space | Reserved for native audio play/pause; never labels or advances |
+| Space | Native in audio and editable/form controls; never labels or advances |
 | Q | Bad quality (image tasks) |
 | R | Replay audio |
 | Z | Undo last |
