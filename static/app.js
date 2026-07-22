@@ -194,7 +194,6 @@ async function loadConfig() {
             if (i < 9) KEY_MAP[String(i + 1)] = s;
         });
         KEY_MAP.x = 'REFUSE';
-        KEY_MAP[' '] = 'REFUSE';
         KEY_MAP.q = 'BAD_QUALITY';
         KEY_MAP.r = 'REPLAY';
 
@@ -716,7 +715,7 @@ function bindRankingControls() {
             chooseRankingCandidate(card.dataset.candidateId);
         });
         card.addEventListener('keydown', (event) => {
-            if (event.target !== card || !['Enter', ' '].includes(event.key)) return;
+            if (event.target !== card || event.key !== 'Enter') return;
             event.preventDefault();
             chooseRankingCandidate(card.dataset.candidateId);
         });
@@ -1371,7 +1370,7 @@ function bindRankingHistoryControls() {
             });
             card.addEventListener('keydown', (event) => {
                 if (event.target.closest('audio, a, input, select, textarea')) return;
-                if (event.key !== 'Enter' && event.key !== ' ') return;
+                if (event.key !== 'Enter') return;
                 event.preventDefault();
                 card.click();
             });
@@ -1570,12 +1569,23 @@ function isShortcutSuppressed(event) {
     return Boolean(document.querySelector('.modal.active'));
 }
 
+function allowsNativeSpace(target) {
+    return target instanceof Element
+        && (target.isContentEditable || Boolean(target.closest('audio, input, textarea, select')));
+}
+
 // ============================================================================
 // Keyboard Shortcuts
 // ============================================================================
 
 document.addEventListener('keydown', (e) => {
     const key = e.key.toLowerCase();
+
+    if (key === ' ') {
+        if (allowsNativeSpace(e.target)) return;
+        e.preventDefault();
+        return;
+    }
 
     if (key === 'escape') {
         closeModalElement(document.querySelector('.modal.active'));
@@ -1631,11 +1641,6 @@ document.addEventListener('keydown', (e) => {
         return;
     }
 
-    if (isConfirmationMode() && key === ' ') {
-        e.preventDefault();
-        return;
-    }
-
     if (key === 'z') {
         e.preventDefault();
         undoLast();
@@ -1667,6 +1672,10 @@ document.addEventListener('keydown', (e) => {
         e.preventDefault();
         label(KEY_MAP[key]);
     }
+});
+
+document.addEventListener('keyup', (e) => {
+    if (e.key === ' ' && !allowsNativeSpace(e.target)) e.preventDefault();
 });
 
 // ============================================================================
