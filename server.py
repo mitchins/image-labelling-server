@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -17,6 +18,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.params import Path as PathParam
@@ -51,6 +53,21 @@ CONFIG = None  # LabelConfig instance
 CONFIRMATIONS = {"STRONG", "LOOSE", "NONE", "INVALID"}
 
 app = FastAPI(title="Smart Label", description="Configurable image labeling")
+
+NO_STORE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+    "Surrogate-Control": "no-store",
+}
+
+
+@app.middleware("http")
+async def prevent_stale_responses(request, call_next):
+    """The UI is a live review surface: never allow an old task or asset to persist."""
+    response = await call_next(request)
+    response.headers.update(NO_STORE_HEADERS)
+    return response
 
 # Add CORS middleware
 app.add_middleware(
@@ -202,12 +219,12 @@ def get_database_ranking_criterion(db_path) -> dict:
 
 def public_ranking_set(ranking_set: dict) -> dict:
     """Attach opaque media URLs and remove private filesystem locations."""
-    from urllib.parse import urlencode
-
     for candidate in ranking_set.get("candidates", []):
+        path = Path(candidate["path"])
         candidate["url"] = "/api/ranking/media?" + urlencode({
             "set_id": ranking_set["set_id"],
             "candidate_id": candidate["candidate_id"],
+            "v": media_fingerprint(path),
         })
         candidate.pop("path", None)
     return ranking_set
@@ -235,9 +252,11 @@ def safe_get_metadata(row, field: str):
 
 def build_image_response(row) -> dict:
     """Build response dict from queue row, handling optional metadata."""
+    path = Path(row["path"])
     response = {
         "id": row["id"],
         "path": row["path"],
+        "media_url": make_media_url(row["id"], path),
         "media_type": row["media_type"] if "media_type" in row.keys() else (CONFIG.media_type if CONFIG else guess_media_type_from_path(row["path"])),
         "cluster_id": row["cluster_id"],
         "predicted_style": row["predicted_style"],
@@ -249,6 +268,31 @@ def build_image_response(row) -> dict:
             response[field] = safe_get_metadata(row, field)
     
     return response
+
+
+def media_fingerprint(path: Path) -> str:
+    """Return a source-lineage and content token suitable for a media URL.
+
+    The path is included so replacing a queue with another source at the same
+    database ID cannot reuse a browser cache entry.  Existing files also add a
+    byte hash, so in-place edits receive a new URL.  A missing file still has a
+    deterministic lineage token; its later request fails visibly with 404.
+    """
+    digest = hashlib.sha256()
+    try:
+        digest.update(str(path.resolve(strict=False)).encode("utf-8", "surrogateescape"))
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise HTTPException(status_code=409, detail=f"Media source cannot be fingerprinted: {path}") from exc
+    return digest.hexdigest()
+
+
+def make_media_url(image_id: int, path: Path) -> str:
+    return f"/api/media/{image_id}?" + urlencode({"v": media_fingerprint(path)})
 
 
 def get_progress_stats(cur):
@@ -650,7 +694,7 @@ async def get_stats():
 
 
 @app.get("/api/ranking/media")
-async def get_ranking_media(set_id: str, candidate_id: str):
+async def get_ranking_media(set_id: str, candidate_id: str, v: Optional[str] = None):
     """Deliver a ranking candidate without exposing filesystem access to the browser."""
     if not is_ranking_mode():
         raise HTTPException(status_code=404, detail="Ranking mode is not active")
@@ -663,14 +707,18 @@ async def get_ranking_media(set_id: str, candidate_id: str):
     )
     if candidate is None:
         raise HTTPException(status_code=404, detail="Candidate not found")
+    if v is None:
+        raise HTTPException(status_code=400, detail="Media version token is required")
     path = Path(candidate["path"])
     if not path.exists():
         raise HTTPException(status_code=404, detail="Media file not found")
+    if v != media_fingerprint(path):
+        raise HTTPException(status_code=409, detail="Media changed; reload the task before labeling")
     media_type = candidate.get("media_type") or guess_media_type_from_path(path)
     return FileResponse(path, media_type=guess_mime_type(path, media_type))
 
 
-def _get_media_response(image_id: int, expected_media_type: Optional[str] = None):
+def _get_media_response(image_id: int, expected_media_type: Optional[str] = None, v: Optional[str] = None):
     """Get media file by database ID."""
     with get_db() as conn:
         cur = conn.cursor()
@@ -679,10 +727,14 @@ def _get_media_response(image_id: int, expected_media_type: Optional[str] = None
         
         if not row:
             raise HTTPException(status_code=404, detail="Item not found")
+        if v is None:
+            raise HTTPException(status_code=400, detail="Media version token is required")
         
         path = Path(row["path"])
         if not path.exists():
             raise HTTPException(status_code=404, detail="Media file not found")
+        if v != media_fingerprint(path):
+            raise HTTPException(status_code=409, detail="Media changed; reload the task before labeling")
 
         media_type = row["media_type"] if "media_type" in row.keys() else guess_media_type_from_path(path)
         if expected_media_type and media_type != expected_media_type:
@@ -692,15 +744,15 @@ def _get_media_response(image_id: int, expected_media_type: Optional[str] = None
 
 
 @app.get("/api/media/{image_id}")
-async def get_media(image_id: int):
+async def get_media(image_id: int, v: Optional[str] = None):
     """Get media file by database ID."""
-    return _get_media_response(image_id)
+    return _get_media_response(image_id, v=v)
 
 
 @app.get("/api/image/{image_id}")
-async def get_image(image_id: int):
+async def get_image(image_id: int, v: Optional[str] = None):
     """Backward-compatible alias for image tasks."""
-    return _get_media_response(image_id, expected_media_type="image")
+    return _get_media_response(image_id, expected_media_type="image", v=v)
 
 
 @app.get("/api/export")
@@ -785,6 +837,7 @@ async def get_history(
             item = {
                 "id": row["id"],
                 "path": row["path"],
+                "media_url": make_media_url(row["id"], Path(row["path"])),
                 "media_type": row["media_type"] if "media_type" in row.keys() else guess_media_type_from_path(row["path"]),
                 "label": row[status_column],
                 "cluster_id": row["cluster_id"],
@@ -1371,7 +1424,7 @@ def get_inline_html():
             // Preload images into browser cache
             preloadedImages.forEach(img => {
                 const preload = new Image();
-                preload.src = '/api/image/' + img.id;
+                preload.src = img.media_url;
             });
         }
         
@@ -1379,7 +1432,7 @@ def get_inline_html():
             const main = document.getElementById('main');
             main.innerHTML = `
                 <div class="image-container">
-                    <img src="/api/image/${data.id}" alt="Frame to label">
+                    <img src="${data.media_url}" alt="Frame to label">
                 </div>
                 <div class="prediction">
                     Predicted: <strong>${data.predicted_style}</strong> 
@@ -1465,7 +1518,7 @@ def get_inline_html():
                 const timeStr = item.labeled_at ? new Date(item.labeled_at).toLocaleString() : 'Unknown';
                 // API returns 'label', not 'human_label'
                 div.innerHTML = `
-                    <img src="/api/image/${item.id}" alt="Image">
+                    <img src="${item.media_url}" alt="Image">
                     <div class="history-item-info">
                         <div><strong>${item.path.split('/').pop()}</strong></div>
                         <div class="history-item-label">Label: ${item.label || '?'}</div>
@@ -1500,7 +1553,7 @@ def get_inline_html():
             // Re-render without updating progress (it's already labeled)
             document.getElementById('main').innerHTML = `
                 <div class="image-container">
-                    <img src="/api/image/${image.id}" alt="Frame to relabel">
+                    <img src="${image.media_url}" alt="Frame to relabel">
                 </div>
                 <div class="prediction">
                     Previous label: <strong style="color: #888">${image.predicted_style}</strong>

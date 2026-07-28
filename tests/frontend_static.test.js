@@ -71,6 +71,16 @@ test('audio autoplay is user-controlled and excluded from ranking candidates', (
     assert.doesNotMatch(appSource, /ranking-audio[^`]*audioAutoplayAttribute/);
 });
 
+test('media URLs prefer the server-issued content-addressed URL', () => {
+    assert.match(appSource, /function getMediaUrl\(item = currentItem\) \{\s*return item\?\.media_url \|\| '';/);
+    assert.doesNotMatch(appSource, /\/api\/media\/\$\{/);
+});
+
+test('classification cards render configured metadata such as transcripts', () => {
+    assert.match(appSource, /const configuredMetadata = \(CONFIG\?\.metadata_fields \|\| \[\]\)/);
+    assert.match(appSource, /\$\{configuredMetadata \? `<dl class="confirmation-meta">\$\{configuredMetadata\}<\/dl>` : ''\}/);
+});
+
 test('space never labels, submits, or activates review cards', () => {
     assert.doesNotMatch(appSource, /KEY_MAP\[' '\]/);
     assert.doesNotMatch(appSource, /\['Enter', ' '\]/);
