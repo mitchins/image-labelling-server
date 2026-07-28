@@ -167,6 +167,7 @@ function getTaskMediaType(item = currentItem) {
 }
 
 function getMediaUrl(item = currentItem) {
+    if (item?.media_url) return item.media_url;
     return `/api/media/${item.id}`;
 }
 

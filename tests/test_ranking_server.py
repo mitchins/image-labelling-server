@@ -80,10 +80,12 @@ def test_ranking_next_media_submit_idempotency_stats_and_export(ranking_client):
     assert ranking_set["criterion"]["direction"] == "most"
     assert [item["display_position"] for item in ranking_set["candidates"]] == [1, 2]
     assert all("path" not in item for item in ranking_set["candidates"])
+    assert all("v=" in item["url"] for item in ranking_set["candidates"])
 
     media = client.get(ranking_set["candidates"][0]["url"])
     assert media.status_code == 200
     assert media.content == b"RIFFtest"
+    assert media.headers["cache-control"].startswith("no-store")
 
     payload = _rank_payload(ranking_set)
     first = client.post("/api/rank", json=payload)

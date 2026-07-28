@@ -71,6 +71,10 @@ test('audio autoplay is user-controlled and excluded from ranking candidates', (
     assert.doesNotMatch(appSource, /ranking-audio[^`]*audioAutoplayAttribute/);
 });
 
+test('media URLs prefer the server-issued content-addressed URL', () => {
+    assert.match(appSource, /function getMediaUrl\(item = currentItem\) \{\s*if \(item\?\.media_url\) return item\.media_url;/);
+});
+
 test('space never labels, submits, or activates review cards', () => {
     assert.doesNotMatch(appSource, /KEY_MAP\[' '\]/);
     assert.doesNotMatch(appSource, /\['Enter', ' '\]/);
