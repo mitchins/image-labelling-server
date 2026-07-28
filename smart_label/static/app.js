@@ -525,6 +525,10 @@ function renderItem(data) {
     if (data.production_year) metaInfo.push(`📅 ${data.production_year}`);
     if (data.demographic) metaInfo.push(`👥 ${capitalize(data.demographic)}`);
     const metaDisplay = metaInfo.length > 0 ? `<span class="meta-tags">${metaInfo.join(' | ')}</span>` : '';
+    const configuredMetadata = (CONFIG?.metadata_fields || [])
+        .filter((field) => data[field] !== undefined && data[field] !== null && data[field] !== '')
+        .map((field) => `<div class="confirmation-meta-row"><dt>${escapeHtml(field.replaceAll('_', ' '))}</dt><dd>${escapeHtml(formatMetadataValue(data[field]))}</dd></div>`)
+        .join('');
 
     const clusterInfo = data.cluster_id !== undefined && data.cluster_id !== null
         ? `<span class="cluster-info">Cluster ${data.cluster_id}</span>`
@@ -581,6 +585,7 @@ function renderItem(data) {
 
     main.innerHTML = `
         ${mediaHtml}
+        ${configuredMetadata ? `<dl class="confirmation-meta">${configuredMetadata}</dl>` : ''}
         <div class="meta">
             ${seriesDisplay}
             ${metaDisplay}

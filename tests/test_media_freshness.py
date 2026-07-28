@@ -41,6 +41,7 @@ def test_queue_replacement_cannot_reuse_media_url_or_cached_bytes(tmp_path, monk
 
     client = configure(monkeypatch, first_db)
     first_url = client.get("/api/next").json()["media_url"]
+    assert client.get("/api/media/1").status_code == 400
     first_response = client.get(first_url)
     assert first_response.content == b"first queue bytes"
     assert first_response.headers["cache-control"].startswith("no-store")

@@ -707,10 +707,12 @@ async def get_ranking_media(set_id: str, candidate_id: str, v: Optional[str] = N
     )
     if candidate is None:
         raise HTTPException(status_code=404, detail="Candidate not found")
+    if v is None:
+        raise HTTPException(status_code=400, detail="Media version token is required")
     path = Path(candidate["path"])
     if not path.exists():
         raise HTTPException(status_code=404, detail="Media file not found")
-    if v is not None and v != media_fingerprint(path):
+    if v != media_fingerprint(path):
         raise HTTPException(status_code=409, detail="Media changed; reload the task before labeling")
     media_type = candidate.get("media_type") or guess_media_type_from_path(path)
     return FileResponse(path, media_type=guess_mime_type(path, media_type))
@@ -725,11 +727,13 @@ def _get_media_response(image_id: int, expected_media_type: Optional[str] = None
         
         if not row:
             raise HTTPException(status_code=404, detail="Item not found")
+        if v is None:
+            raise HTTPException(status_code=400, detail="Media version token is required")
         
         path = Path(row["path"])
         if not path.exists():
             raise HTTPException(status_code=404, detail="Media file not found")
-        if v is not None and v != media_fingerprint(path):
+        if v != media_fingerprint(path):
             raise HTTPException(status_code=409, detail="Media changed; reload the task before labeling")
 
         media_type = row["media_type"] if "media_type" in row.keys() else guess_media_type_from_path(path)

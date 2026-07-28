@@ -75,6 +75,11 @@ test('media URLs prefer the server-issued content-addressed URL', () => {
     assert.match(appSource, /function getMediaUrl\(item = currentItem\) \{\s*if \(item\?\.media_url\) return item\.media_url;/);
 });
 
+test('classification cards render configured metadata such as transcripts', () => {
+    assert.match(appSource, /const configuredMetadata = \(CONFIG\?\.metadata_fields \|\| \[\]\)/);
+    assert.match(appSource, /\$\{configuredMetadata \? `<dl class="confirmation-meta">\$\{configuredMetadata\}<\/dl>` : ''\}/);
+});
+
 test('space never labels, submits, or activates review cards', () => {
     assert.doesNotMatch(appSource, /KEY_MAP\[' '\]/);
     assert.doesNotMatch(appSource, /\['Enter', ' '\]/);
