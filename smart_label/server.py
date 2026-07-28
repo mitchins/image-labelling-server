@@ -279,8 +279,8 @@ def media_fingerprint(path: Path) -> str:
     deterministic lineage token; its later request fails visibly with 404.
     """
     digest = hashlib.sha256()
-    digest.update(str(path.resolve(strict=False)).encode("utf-8", "surrogateescape"))
     try:
+        digest.update(str(path.resolve(strict=False)).encode("utf-8", "surrogateescape"))
         with path.open("rb") as source:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(chunk)
@@ -1424,7 +1424,7 @@ def get_inline_html():
             // Preload images into browser cache
             preloadedImages.forEach(img => {
                 const preload = new Image();
-                preload.src = img.media_url || ('/api/image/' + img.id);
+                preload.src = img.media_url;
             });
         }
         
@@ -1432,7 +1432,7 @@ def get_inline_html():
             const main = document.getElementById('main');
             main.innerHTML = `
                 <div class="image-container">
-                    <img src="${data.media_url || ('/api/image/' + data.id)}" alt="Frame to label">
+                    <img src="${data.media_url}" alt="Frame to label">
                 </div>
                 <div class="prediction">
                     Predicted: <strong>${data.predicted_style}</strong> 
@@ -1518,7 +1518,7 @@ def get_inline_html():
                 const timeStr = item.labeled_at ? new Date(item.labeled_at).toLocaleString() : 'Unknown';
                 // API returns 'label', not 'human_label'
                 div.innerHTML = `
-                    <img src="${item.media_url || ('/api/image/' + item.id)}" alt="Image">
+                    <img src="${item.media_url}" alt="Image">
                     <div class="history-item-info">
                         <div><strong>${item.path.split('/').pop()}</strong></div>
                         <div class="history-item-label">Label: ${item.label || '?'}</div>
@@ -1553,7 +1553,7 @@ def get_inline_html():
             // Re-render without updating progress (it's already labeled)
             document.getElementById('main').innerHTML = `
                 <div class="image-container">
-                    <img src="${image.media_url || ('/api/image/' + image.id)}" alt="Frame to relabel">
+                    <img src="${image.media_url}" alt="Frame to relabel">
                 </div>
                 <div class="prediction">
                     Previous label: <strong style="color: #888">${image.predicted_style}</strong>

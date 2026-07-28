@@ -156,10 +156,7 @@ function getCandidateMediaType(candidate) {
 
 function getCandidateMediaUrl(candidate) {
     if (candidate?.url) return candidate.url;
-    if (candidate?.id !== undefined && candidate?.id !== null) {
-        return `/api/media/${encodeURIComponent(candidate.id)}`;
-    }
-    return candidate?.path || '';
+    return '';
 }
 
 function getTaskMediaType(item = currentItem) {
@@ -167,8 +164,7 @@ function getTaskMediaType(item = currentItem) {
 }
 
 function getMediaUrl(item = currentItem) {
-    if (item?.media_url) return item.media_url;
-    return `/api/media/${item.id}`;
+    return item?.media_url || '';
 }
 
 function getItemName(item = currentItem) {

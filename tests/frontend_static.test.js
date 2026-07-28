@@ -72,7 +72,8 @@ test('audio autoplay is user-controlled and excluded from ranking candidates', (
 });
 
 test('media URLs prefer the server-issued content-addressed URL', () => {
-    assert.match(appSource, /function getMediaUrl\(item = currentItem\) \{\s*if \(item\?\.media_url\) return item\.media_url;/);
+    assert.match(appSource, /function getMediaUrl\(item = currentItem\) \{\s*return item\?\.media_url \|\| '';/);
+    assert.doesNotMatch(appSource, /\/api\/media\/\$\{/);
 });
 
 test('classification cards render configured metadata such as transcripts', () => {

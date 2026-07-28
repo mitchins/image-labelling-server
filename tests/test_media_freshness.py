@@ -3,6 +3,7 @@
 import sqlite3
 
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
 
 from config import LabelConfig
 
@@ -73,3 +74,24 @@ def test_in_place_media_change_invalidates_issued_url(tmp_path, monkeypatch):
     refreshed_url = client.get("/api/next").json()["media_url"]
     assert refreshed_url != issued_url
     assert client.get(refreshed_url).content == b"replacement"
+
+
+def test_media_fingerprint_converts_path_resolution_errors_to_conflict(monkeypatch, tmp_path):
+    import server
+
+    def fail_to_resolve(self, *, strict=False):
+        raise OSError("cannot resolve source")
+
+    monkeypatch.setattr(type(tmp_path), "resolve", fail_to_resolve)
+    try:
+        server.media_fingerprint(tmp_path / "clip.wav")
+    except HTTPException as exc:
+        assert exc.status_code == 409
+    else:
+        raise AssertionError("path resolution errors must be reported as conflicts")
+
+
+def test_inline_ui_does_not_construct_tokenless_media_urls():
+    import server
+
+    assert "|| ('/api/image/'" not in server.get_inline_html()
