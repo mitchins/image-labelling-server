@@ -76,6 +76,31 @@ test('media URLs prefer the server-issued content-addressed URL', () => {
     assert.doesNotMatch(appSource, /\/api\/media\/\$\{/);
 });
 
+test('undo restores the server-returned item and invalidates late next-item responses', () => {
+    assert.match(appSource, /let navigationVersion = 0;/);
+    assert.match(appSource, /const requestVersion = \+\+navigationVersion;/);
+    assert.match(appSource, /if \(requestVersion !== navigationVersion\) return;/);
+    assert.match(appSource, /if \(data\.success\) \{[\s\S]*navigationVersion \+= 1;/);
+    assert.match(appSource, /const item = data\.item \|\| data\.returned_item;/);
+    assert.match(appSource, /currentItem = item;[\s\S]*renderItem\(item\);/);
+    assert.match(appSource, /if \(isRankingMode\(\) && item\?\.set\)[\s\S]*currentRankingSet = item\.set;/);
+    assert.match(appSource, /async function loadReplacement\(clusterId\) \{\s*const requestVersion = \+\+navigationVersion;/);
+    assert.match(appSource, /Failed to load replacement:', err\);\s*if \(requestVersion === navigationVersion\) loadNext\(\);/);
+});
+
+test('history refreshes after changes and prevents stale reads or corrections', () => {
+    assert.match(appSource, /function refreshHistoryIfOpen\(\)[\s\S]*void loadHistory\(currentHistoryPage\)/);
+    assert.match(appSource, /let historyLoadVersion = 0;/);
+    assert.match(appSource, /const requestVersion = \+\+historyLoadVersion;/);
+    assert.match(appSource, /if \(requestVersion !== historyLoadVersion\) return;/);
+    assert.match(appSource, /expected_confirmation: item\.confirmation/);
+    assert.match(appSource, /expected_confirmation_at: item\.confirmation_at/);
+    assert.match(appSource, /expected_labeled_at: item\.labeled_at/);
+    assert.match(appSource, /session_id: sessionId,[\s\S]*expected_label: item\.label/);
+    assert.match(appSource, /const historyMutationInFlight = new Set\(\);/);
+    assert.match(appSource, /if \(res\.status === 409\) await loadHistory\(currentHistoryPage\);/);
+});
+
 test('classification cards render configured metadata such as transcripts', () => {
     assert.match(appSource, /const configuredMetadata = \(CONFIG\?\.metadata_fields \|\| \[\]\)/);
     assert.match(appSource, /\$\{configuredMetadata \? `<dl class="confirmation-meta">\$\{configuredMetadata\}<\/dl>` : ''\}/);
