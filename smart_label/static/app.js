@@ -1163,7 +1163,7 @@ let historyItemsById = new Map();
 
 function refreshHistoryIfOpen() {
     if (document.getElementById('historyModal')?.classList.contains('active')) {
-        void loadHistory(1);
+        void loadHistory(currentHistoryPage);
     }
 }
 
