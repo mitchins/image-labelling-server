@@ -176,6 +176,24 @@ class TestLabelValidation:
             row = conn.execute("SELECT human_label FROM queue WHERE id = 1").fetchone()
         assert row[0] is None
 
+    def test_history_relabel_uses_a_revision_and_assigns_undo_ownership(self, client):
+        item = client.get("/api/history").json()["items"][0]
+        payload = {
+            "label": "flat",
+            "session_id": "reviewer-b",
+            "expected_label": item["label"],
+            "expected_labeled_at": item["labeled_at"],
+        }
+        assert client.post("/api/history/2/relabel", json=payload).status_code == 200
+
+        stale = client.post("/api/history/2/relabel", json={
+            **payload, "label": "grim", "session_id": "reviewer-a"
+        })
+        assert stale.status_code == 409
+
+        assert client.post("/api/undo?session_id=reviewer-a").json()["success"] is False
+        assert client.post("/api/undo?session_id=reviewer-b").json()["undone_id"] == 2
+
 
 @pytest.fixture
 def confirmation_client(tmp_path, monkeypatch):
@@ -297,10 +315,18 @@ class TestOntologyConfirmation:
         assert client.post("/api/label", json={
             "image_id": 1, "confirmation": "LOOSE", "session_id": "reviewer-a"
         }).status_code == 200
-        corrected = client.post("/api/history/1/relabel", json={
-            "confirmation": "NONE", "session_id": "reviewer-b"
-        })
+        history_item = client.get("/api/history").json()["items"][0]
+        correction = {
+            "confirmation": "NONE", "session_id": "reviewer-b",
+            "expected_confirmation": history_item["confirmation"],
+            "expected_confirmation_at": history_item["confirmation_at"],
+        }
+        corrected = client.post("/api/history/1/relabel", json=correction)
         assert corrected.status_code == 200
+        stale = client.post("/api/history/1/relabel", json={
+            **correction, "confirmation": "INVALID", "session_id": "reviewer-a"
+        })
+        assert stale.status_code == 409
 
         old_owner = client.post("/api/undo?session_id=reviewer-a").json()
         assert old_owner["success"] is False
@@ -316,8 +342,11 @@ class TestOntologyConfirmation:
             assert client.post("/api/label", json={
                 "image_id": item_id, "confirmation": outcome, "session_id": "reviewer-a"
             }).status_code == 200
+        item = next(item for item in client.get("/api/history").json()["items"] if item["id"] == 1)
         assert client.post("/api/history/1/relabel", json={
-            "confirmation": "NONE", "session_id": "reviewer-a"
+            "confirmation": "NONE", "session_id": "reviewer-a",
+            "expected_confirmation": item["confirmation"],
+            "expected_confirmation_at": item["confirmation_at"],
         }).status_code == 200
         history = client.get("/api/history").json()["items"]
         assert [item["id"] for item in history] == [1, 2]

@@ -370,6 +370,10 @@ class RelabelRequest(BaseModel):
     quality_flag: Optional[str] = None  # Optional flag (e.g., BAD_QUALITY)
     confirmation: Optional[str] = None
     session_id: Optional[str] = None
+    expected_label: Optional[str] = None
+    expected_labeled_at: Optional[str] = None
+    expected_confirmation: Optional[str] = None
+    expected_confirmation_at: Optional[str] = None
 
 
 class RankingRequest(BaseModel):
@@ -886,6 +890,8 @@ async def relabel_from_history(image_id: int, request: RelabelRequest):
     if is_confirmation_mode():
         if request.confirmation not in CONFIRMATIONS:
             raise HTTPException(status_code=400, detail="Invalid confirmation")
+        if request.expected_confirmation is None or request.expected_confirmation_at is None:
+            raise HTTPException(status_code=400, detail="History revision is required")
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute("SELECT confirmation, indicative_value FROM queue WHERE id = ?", (image_id,))
@@ -896,13 +902,19 @@ async def relabel_from_history(image_id: int, request: RelabelRequest):
                 raise HTTPException(status_code=400, detail="Row ontology value is not in configured ontology")
             session_id = request.session_id if hasattr(request, "session_id") else None
             session_id = session_id or str(uuid.uuid4())
-            cur.execute("UPDATE queue SET confirmation = ?, confirmation_at = ?, confirmation_session_id = ? WHERE id = ?",
-                (request.confirmation, datetime.now().isoformat(), session_id, image_id))
+            cur.execute("""UPDATE queue SET confirmation = ?, confirmation_at = ?, confirmation_session_id = ?
+                WHERE id = ? AND confirmation IS ? AND confirmation_at IS ?""",
+                (request.confirmation, datetime.now().isoformat(), session_id, image_id,
+                 request.expected_confirmation, request.expected_confirmation_at))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=409, detail="Decision changed; reload history")
             conn.commit()
             return {"success": True, "image_id": image_id, "confirmation": request.confirmation, "session_id": session_id}
     valid_labels = get_valid_labels()
     if request.label not in valid_labels:
         raise HTTPException(status_code=400, detail=f"Invalid label: {request.label}")
+    if request.expected_label is None or request.expected_labeled_at is None:
+        raise HTTPException(status_code=400, detail="History revision is required")
     
     with get_db() as conn:
         cur = conn.cursor()
@@ -923,8 +935,11 @@ async def relabel_from_history(image_id: int, request: RelabelRequest):
         cur.execute("""
             UPDATE queue 
             SET human_label = ?, quality_flag = ?, labeled_at = ?, session_id = ?
-            WHERE id = ?
-        """, (request.label, request.quality_flag, datetime.now().isoformat(), session_id, image_id))
+            WHERE id = ? AND human_label IS ? AND labeled_at IS ?
+        """, (request.label, request.quality_flag, datetime.now().isoformat(), session_id, image_id,
+              request.expected_label, request.expected_labeled_at))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=409, detail="Decision changed; reload history")
         
         conn.commit()
         

@@ -26,6 +26,7 @@ let pendingRankingUndo = null;
 let rankingUndoInFlight = false;
 const rankingSubmissionStack = [];
 const historyCorrectionStates = new WeakMap();
+const historyMutationInFlight = new Set();
 let preloadedImages = [];
 let isLabeling = false;
 let lastSubmitAt = 0;
@@ -352,6 +353,7 @@ async function label(style, qualityFlag = null) {
         if (data.success) {
             updateProgress(data.progress);
             flashButton(style);
+            refreshHistoryIfOpen();
 
             if (style === 'REFUSE') {
                 loadReplacement(currentItem.cluster_id);
@@ -393,6 +395,7 @@ async function confirmItem(confirmation, item = currentItem) {
             return;
         }
         updateProgress(data.progress);
+        refreshHistoryIfOpen();
         renderReceipt(item, confirmation);
         flashButton(`confirmation-${confirmation}`);
         await loadNext();
@@ -476,6 +479,7 @@ async function undoLast() {
             // Supersede in-flight random next/replacement requests only after
             // the server confirms that this specific decision was undone.
             navigationVersion += 1;
+            refreshHistoryIfOpen();
             if (target) {
                 rankingSubmissionStack.pop();
                 rankingSubmissionStack.forEach((entry) => {
@@ -1154,6 +1158,14 @@ function closeModal(event) {
 // ============================================================================
 
 let currentHistoryPage = 1;
+let historyLoadVersion = 0;
+let historyItemsById = new Map();
+
+function refreshHistoryIfOpen() {
+    if (document.getElementById('historyModal')?.classList.contains('active')) {
+        void loadHistory(1);
+    }
+}
 
 async function showHistory() {
     const modal = document.getElementById('historyModal');
@@ -1175,6 +1187,7 @@ async function showHistory() {
 
 async function loadHistory(page = 1) {
     currentHistoryPage = page;
+    const requestVersion = ++historyLoadVersion;
     const content = document.getElementById('historyContent');
     const filter = document.getElementById('historyFilter').value;
 
@@ -1184,6 +1197,11 @@ async function loadHistory(page = 1) {
         const url = `/api/history?page=${page}&per_page=12${filter ? `&label_filter=${filter}` : ''}`;
         const res = await fetch(url);
         const data = await res.json();
+
+        // Filter, pagination, and corrections can overlap; only render the
+        // newest response so an older snapshot cannot overwrite it.
+        if (requestVersion !== historyLoadVersion) return;
+        historyItemsById = new Map((data.items || []).map((item) => [Number(item.id), item]));
 
         if (!data.items || data.items.length === 0) {
             content.innerHTML = '<p class="history-empty">No labeled items yet</p>';
@@ -1212,6 +1230,7 @@ async function loadHistory(page = 1) {
             pagination.innerHTML = '';
         }
     } catch (err) {
+        if (requestVersion !== historyLoadVersion) return;
         console.error('Failed to load history:', err);
         content.innerHTML = '<p>Failed to load history</p>';
     }
@@ -1227,7 +1246,7 @@ function renderHistoryItem(item) {
         const media = getTaskMediaType(item) === 'audio'
             ? `<audio id="history-audio-${item.id}" controls preload="none" src="${getMediaUrl(item)}"></audio>`
             : `<img src="${getMediaUrl(item)}" alt="Reviewed item" loading="lazy">`;
-        return `<div class="confirmation-history-item">
+        return `<div class="confirmation-history-item" data-history-item-id="${Number(item.id)}">
             <div class="confirmation-history-media">${media}</div>
             <div class="confirmation-history-summary"><strong>${escapeHtml(entry?.display_name || indicative)}</strong><span class="history-outcome">${escapeHtml(outcome)}</span></div>
             <div class="confirmation-history-actions">${['STRONG', 'LOOSE', 'NONE', 'INVALID'].map((value) => `<button class="btn-secondary" onclick="confirmHistory(${Number(item.id)}, '${value}')">${value}</button>`).join('')}</div>
@@ -1238,7 +1257,7 @@ function renderHistoryItem(item) {
 
     if (mediaType === 'audio') {
         return `
-            <div class="history-audio-item">
+            <div class="history-audio-item" data-history-item-id="${Number(item.id)}">
                 <div class="history-audio-main">
                     <div class="history-audio-head">
                         <div class="history-audio-name">${getItemName(item)}</div>
@@ -1257,7 +1276,7 @@ function renderHistoryItem(item) {
     }
 
     return `
-        <div class="history-item" onclick="relabelFromHistory('${item.id}')">
+        <div class="history-item" data-history-item-id="${Number(item.id)}" onclick="relabelFromHistory('${item.id}')">
             <img src="${getMediaUrl(item)}" alt="Labeled frame" loading="lazy">
             <div class="history-label" style="background:${labelColor}">
                 ${capitalize(item.label)}
@@ -1473,28 +1492,43 @@ async function rerankHistorySet(setId, revision, orderedCandidateIds, outcome = 
 }
 
 async function confirmHistory(imageId, confirmation) {
+    const item = historyItemsById.get(Number(imageId));
+    if (!item || historyMutationInFlight.has(imageId)) return;
+    historyMutationInFlight.add(imageId);
+    setHistoryItemBusy(imageId, true);
     try {
         const res = await fetch(`/api/history/${imageId}/relabel`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ confirmation, session_id: sessionId })
+            body: JSON.stringify({
+                confirmation,
+                session_id: sessionId,
+                expected_confirmation: item.confirmation,
+                expected_confirmation_at: item.confirmation_at
+            })
         });
         const data = await res.json();
         if (!res.ok || !data.success) {
             showToast(data.detail || 'Failed to change confirmation');
+            if (res.status === 409) await loadHistory(currentHistoryPage);
             return;
         }
         const receipt = document.getElementById('lastDecisionGlobal');
         if (receipt) receipt.innerHTML = `History correction &rarr; <strong>${escapeHtml(confirmation)}</strong>`;
         showToast(`Changed to ${confirmation}`);
-        loadHistory(currentHistoryPage);
+        await loadHistory(currentHistoryPage);
     } catch (err) {
         console.error('Confirmation correction failed:', err);
         showToast('Failed to change confirmation');
+    } finally {
+        historyMutationInFlight.delete(imageId);
+        setHistoryItemBusy(imageId, false);
     }
 }
 
 async function relabelFromHistory(imageId) {
+    const item = historyItemsById.get(Number(imageId));
+    if (!item || historyMutationInFlight.has(imageId)) return;
     const newLabel = prompt(`Enter new label for this item.\nValid: ${STYLES.join(', ')}, REFUSE`);
 
     if (!newLabel) return;
@@ -1506,25 +1540,43 @@ async function relabelFromHistory(imageId) {
         return;
     }
 
+    historyMutationInFlight.add(imageId);
+    setHistoryItemBusy(imageId, true);
     try {
         const res = await fetch(`/api/history/${imageId}/relabel`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ label: normalizedLabel })
+            body: JSON.stringify({
+                label: normalizedLabel,
+                session_id: sessionId,
+                expected_label: item.label,
+                expected_labeled_at: item.labeled_at
+            })
         });
 
         const data = await res.json();
 
-        if (data.success) {
+        if (res.ok && data.success) {
             showToast(`Relabeled to ${normalizedLabel}`);
-            loadHistory(currentHistoryPage);
+            await loadHistory(currentHistoryPage);
         } else {
-            showToast(data.message || 'Failed to relabel');
+            showToast(data.detail || data.message || 'Failed to relabel');
+            if (res.status === 409) await loadHistory(currentHistoryPage);
         }
     } catch (err) {
         console.error('Relabel failed:', err);
         showToast('Failed to relabel');
+    } finally {
+        historyMutationInFlight.delete(imageId);
+        setHistoryItemBusy(imageId, false);
     }
+}
+
+function setHistoryItemBusy(imageId, isBusy) {
+    document.querySelectorAll(`[data-history-item-id="${Number(imageId)}"] button`).forEach((button) => {
+        button.disabled = isBusy;
+        button.setAttribute('aria-disabled', String(isBusy));
+    });
 }
 
 function closeHistory() {

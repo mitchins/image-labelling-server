@@ -88,6 +88,18 @@ test('undo restores the server-returned item and invalidates late next-item resp
     assert.match(appSource, /Failed to load replacement:', err\);\s*if \(requestVersion === navigationVersion\) loadNext\(\);/);
 });
 
+test('history refreshes after changes and prevents stale reads or corrections', () => {
+    assert.match(appSource, /function refreshHistoryIfOpen\(\)[\s\S]*void loadHistory\(1\)/);
+    assert.match(appSource, /let historyLoadVersion = 0;/);
+    assert.match(appSource, /const requestVersion = \+\+historyLoadVersion;/);
+    assert.match(appSource, /if \(requestVersion !== historyLoadVersion\) return;/);
+    assert.match(appSource, /expected_confirmation: item\.confirmation/);
+    assert.match(appSource, /expected_labeled_at: item\.labeled_at/);
+    assert.match(appSource, /session_id: sessionId,[\s\S]*expected_label: item\.label/);
+    assert.match(appSource, /const historyMutationInFlight = new Set\(\);/);
+    assert.match(appSource, /if \(res\.status === 409\) await loadHistory\(currentHistoryPage\);/);
+});
+
 test('classification cards render configured metadata such as transcripts', () => {
     assert.match(appSource, /const configuredMetadata = \(CONFIG\?\.metadata_fields \|\| \[\]\)/);
     assert.match(appSource, /\$\{configuredMetadata \? `<dl class="confirmation-meta">\$\{configuredMetadata\}<\/dl>` : ''\}/);
