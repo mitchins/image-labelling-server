@@ -917,12 +917,14 @@ async def relabel_from_history(image_id: int, request: RelabelRequest):
         if row["human_label"] is None:
             raise HTTPException(status_code=400, detail="Image was not previously labeled")
         
-        # Update label
+        # A correction becomes this reviewer's decision, so a prior reviewer
+        # cannot undo it from their own session.
+        session_id = request.session_id or str(uuid.uuid4())
         cur.execute("""
             UPDATE queue 
-            SET human_label = ?, quality_flag = ?, labeled_at = ?
+            SET human_label = ?, quality_flag = ?, labeled_at = ?, session_id = ?
             WHERE id = ?
-        """, (request.label, request.quality_flag, datetime.now().isoformat(), image_id))
+        """, (request.label, request.quality_flag, datetime.now().isoformat(), session_id, image_id))
         
         conn.commit()
         
@@ -1042,7 +1044,12 @@ async def undo_last(
                 ORDER BY confirmation_at DESC LIMIT 1"""
             params = [session_id]
         else:
-            query = """SELECT id, path FROM queue WHERE human_label IS NOT NULL"""
+            # Return the complete record after a successful undo.  The client must
+            # be able to render this exact item instead of asking /api/next for a
+            # random pending record, which can make an undo look like data loss.
+            select_cols = build_select_columns()
+            query = f"""SELECT {select_cols}, human_label, quality_flag, labeled_at, session_id
+                FROM queue WHERE human_label IS NOT NULL"""
             params = []
         if not is_confirmation_mode() and session_id:
             query += " AND session_id = ?"
@@ -1064,16 +1071,30 @@ async def undo_last(
             if cur.rowcount == 0:
                 return {"success": False, "message": "Decision changed before undo; history was preserved"}
         else:
+            # Clear only the exact decision selected above. A history correction
+            # that happens between SELECT and UPDATE must never be erased.
             cur.execute("""UPDATE queue SET human_label = NULL, labeled_at = NULL,
-                quality_flag = NULL, session_id = NULL WHERE id = ?""", (row["id"],))
+                quality_flag = NULL, session_id = NULL
+                WHERE id = ? AND human_label IS ? AND quality_flag IS ?
+                    AND labeled_at IS ? AND session_id IS ?""",
+                (row["id"], row["human_label"], row["quality_flag"],
+                 row["labeled_at"], row["session_id"]))
+            if cur.rowcount == 0:
+                return {"success": False, "message": "Decision changed before undo; history was preserved"}
         conn.commit()
 
-        response = {"success": True, "undone_id": row["id"], "path": row["path"]}
+        item = confirmation_response(row)
+        item["done"] = False
+        item["progress"] = get_progress_stats(cur)
+        response = {
+            "success": True,
+            "undone_id": row["id"],
+            "path": row["path"],
+            "item": item,
+            "progress": item["progress"],
+        }
         if is_confirmation_mode():
-            item = confirmation_response(row)
-            item["done"] = False
-            item["progress"] = get_progress_stats(cur)
-            response["item"] = item
+            response["returned_item"] = item
         return response
 
 

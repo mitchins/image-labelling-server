@@ -29,6 +29,7 @@ const historyCorrectionStates = new WeakMap();
 let preloadedImages = [];
 let isLabeling = false;
 let lastSubmitAt = 0;
+let navigationVersion = 0;
 let sessionId = localStorage.getItem('smartLabelSession') || generateUUID();
 localStorage.setItem('smartLabelSession', sessionId);
 
@@ -240,9 +241,13 @@ function updateShortcutsDisplay(mediaType = getTaskMediaType()) {
 // ============================================================================
 
 async function loadNext() {
+    const requestVersion = ++navigationVersion;
     try {
         const res = await fetch(`/api/next?session_id=${sessionId}`);
         const data = await res.json();
+
+        // A late random-next response must not overwrite the item undo restored.
+        if (requestVersion !== navigationVersion) return;
 
         if (data.done) {
             showDone(data.progress?.total || 0);
@@ -406,9 +411,13 @@ function renderReceipt(item, confirmation) {
 }
 
 async function loadReplacement(clusterId) {
+    const requestVersion = ++navigationVersion;
     try {
         const res = await fetch(`/api/replacement/${clusterId}`);
         const data = await res.json();
+
+        // A late replacement must not overwrite an item restored by undo.
+        if (requestVersion !== navigationVersion) return;
 
         if (data.done) {
             showDone(data.total || 993);
@@ -424,7 +433,7 @@ async function loadReplacement(clusterId) {
         preloadNext();
     } catch (err) {
         console.error('Failed to load replacement:', err);
-        loadNext();
+        if (requestVersion === navigationVersion) loadNext();
     }
 }
 
@@ -464,6 +473,9 @@ async function undoLast() {
         const data = await res.json();
 
         if (data.success) {
+            // Supersede in-flight random next/replacement requests only after
+            // the server confirms that this specific decision was undone.
+            navigationVersion += 1;
             if (target) {
                 rankingSubmissionStack.pop();
                 rankingSubmissionStack.forEach((entry) => {
@@ -472,16 +484,28 @@ async function undoLast() {
                 pendingRankingUndo = null;
             }
             showToast('Undone');
-            if (isConfirmationMode()) {
-                const item = data.item || data.returned_item;
-                if (item && item.id !== undefined) {
+            const item = data.item || data.returned_item;
+            if (isRankingMode() && item?.set) {
+                currentRankingSet = item.set;
+                currentItem = item;
+                rankingDraft = [];
+                rankingFocusedCandidateId = null;
+                updateProgress(item.progress || data.progress);
+                renderItem(item);
+                return;
+            }
+            if (item && item.id !== undefined) {
+                if (isConfirmationMode()) {
                     const receipt = document.getElementById('lastDecisionGlobal');
                     if (receipt) receipt.innerHTML = `Undid decision for <strong>${escapeHtml(item.indicative_value)}</strong>`;
-                    currentItem = item;
-                    updateProgress(item.progress);
-                    renderItem(item);
-                    return;
                 }
+                currentItem = item;
+                updateProgress(item.progress || data.progress);
+                renderItem(item);
+                if (getTaskMediaType(item) === 'image') {
+                    loadGarbageRating(item.id);
+                }
+                return;
             }
             loadNext();
         } else {

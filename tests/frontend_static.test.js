@@ -76,6 +76,18 @@ test('media URLs prefer the server-issued content-addressed URL', () => {
     assert.doesNotMatch(appSource, /\/api\/media\/\$\{/);
 });
 
+test('undo restores the server-returned item and invalidates late next-item responses', () => {
+    assert.match(appSource, /let navigationVersion = 0;/);
+    assert.match(appSource, /const requestVersion = \+\+navigationVersion;/);
+    assert.match(appSource, /if \(requestVersion !== navigationVersion\) return;/);
+    assert.match(appSource, /if \(data\.success\) \{[\s\S]*navigationVersion \+= 1;/);
+    assert.match(appSource, /const item = data\.item \|\| data\.returned_item;/);
+    assert.match(appSource, /currentItem = item;[\s\S]*renderItem\(item\);/);
+    assert.match(appSource, /if \(isRankingMode\(\) && item\?\.set\)[\s\S]*currentRankingSet = item\.set;/);
+    assert.match(appSource, /async function loadReplacement\(clusterId\) \{\s*const requestVersion = \+\+navigationVersion;/);
+    assert.match(appSource, /Failed to load replacement:', err\);\s*if \(requestVersion === navigationVersion\) loadNext\(\);/);
+});
+
 test('classification cards render configured metadata such as transcripts', () => {
     assert.match(appSource, /const configuredMetadata = \(CONFIG\?\.metadata_fields \|\| \[\]\)/);
     assert.match(appSource, /\$\{configuredMetadata \? `<dl class="confirmation-meta">\$\{configuredMetadata\}<\/dl>` : ''\}/);

@@ -156,6 +156,26 @@ class TestLabelValidation:
         data = response.json()
         assert set(data["labels"]) == {"flat", "grim", "modern", "moe"}
 
+    def test_undo_returns_the_exact_restored_item(self, client, test_db):
+        labeled = client.post("/api/label", json={
+            "image_id": 1, "label": "flat", "session_id": "reviewer-a"
+        })
+        assert labeled.status_code == 200
+
+        undone = client.post("/api/undo?session_id=reviewer-a")
+        assert undone.status_code == 200
+        payload = undone.json()
+        assert payload["success"] is True
+        assert payload["undone_id"] == 1
+        assert payload["item"]["id"] == 1
+        assert payload["item"]["media_type"] == "image"
+        assert payload["item"]["media_url"].startswith("/api/media/1?")
+        assert payload["progress"]["labeled"] == 1  # Pre-labeled fixture remains.
+
+        with sqlite3.connect(test_db) as conn:
+            row = conn.execute("SELECT human_label FROM queue WHERE id = 1").fetchone()
+        assert row[0] is None
+
 
 @pytest.fixture
 def confirmation_client(tmp_path, monkeypatch):
@@ -288,6 +308,7 @@ class TestOntologyConfirmation:
         assert new_owner["success"] is True
         assert new_owner["item"]["id"] == 1
         assert new_owner["item"]["indicative_value"] == "DREAD"
+        assert new_owner["item"]["media_type"] == "audio"
 
     def test_history_orders_by_confirmation_timestamp(self, confirmation_client):
         client, _ = confirmation_client
